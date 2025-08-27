@@ -1,7 +1,7 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 import pandas as pd
 import numpy as np
@@ -36,7 +36,7 @@ class Metrics:
     BB_UP: Optional[float] = None
     BB_MID: Optional[float] = None
     BB_LOW: Optional[float] = None
-    # 當日價量
+    # 當日價量（含 VWAP 近似）
     open: Optional[float] = None
     high: Optional[float] = None
     low: Optional[float] = None
@@ -75,28 +75,22 @@ def calc_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
         (high - close_prev).abs(),
         (low - close_prev).abs()
     ], axis=1).max(axis=1)
-    return tr.rolling(n).mean()  # 簡單 SMA；可改 Wilder's RMA
+    return tr.rolling(n).mean()  # 簡單 SMA
 
 def flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if isinstance(out.columns, pd.MultiIndex):
-        # 單標的情境：把第一層(Open/High/Low/Close/Volume)取出
         try:
             out.columns = out.columns.get_level_values(0)
         except Exception:
-            # 若為多標的，退而求其次取第一個標的
             first_symbol = out.columns.levels[1][0]
             out = out.xs(key=first_symbol, axis=1, level=1, drop_level=True)
     return out
 
 def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
-    # 1) 扁平化欄位
     out = flatten_columns_if_needed(df)
+    out = out.rename(columns=lambda s: str(s).strip().title())  # Open/High/Low/Close/Volume
 
-    # 2) 正規化欄名
-    out = out.rename(columns=lambda s: str(s).strip().title())  # Open/High/Low/Close/Adj Close/Volume
-
-    # 3) 轉為數字避免廣播成 DataFrame
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
@@ -146,21 +140,13 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out["ClosePos"] = np.where(rng > 0, (out["Close"] - out["Low"]) / rng, np.nan)
     out["GapPct"] = (out["Open"] / out["PrevClose"] - 1.0) * 100.0
 
-    # 成交量加權平均價（近似）：常用 HLC3 作為日內近似
+    # 成交量加權平均價（近似：HLC3）
     out["VWAP_Approx"] = (out["High"] + out["Low"] + out["Close"]) / 3.0
 
     return out
 
-
-def _get_last_float(s: pd.Series) -> Optional[float]:
-    try:
-        v = s.iloc[-1]
-        return float(v) if pd.notna(v) else None
-    except Exception:
-        return None
-
 def latest_metrics(df: pd.DataFrame) -> Metrics:
-    last = df.iloc[-1]  # 不用 dropna，逐欄位取值
+    last = df.iloc[-1]
     def g(col: str) -> Optional[float]:
         try:
             v = last[col]
@@ -186,7 +172,7 @@ def latest_metrics(df: pd.DataFrame) -> Metrics:
 
 
 # ------------------------
-# 技術面分析（評分/結論）
+# 技術面評分（保留）
 # ------------------------
 def analyze(m: Metrics) -> Dict:
     notes: List[str] = []
@@ -194,7 +180,6 @@ def analyze(m: Metrics) -> Dict:
     def lt(a, b): return (a is not None and b is not None and a < b)
 
     short_score, swing_score = 50, 50
-    # 短線評分
     if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5 (+8)")
     if gt(m.close, m.MA10): short_score += 8; notes.append("收盤>MA10 (+8)")
     if gt(m.MA5, m.MA10): short_score += 6; notes.append("MA5>MA10 (+6)")
@@ -205,7 +190,6 @@ def analyze(m: Metrics) -> Dict:
     if lt(m.close, m.MA20): short_score -= 6; notes.append("收盤<MA20 (-6)")
     if lt(m.volume, m.MV20): short_score -= 4; notes.append("量<MV20 (-4)")
 
-    # 波段評分
     if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
     if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
     if gt(m.MA20, m.MA60): swing_score += 10; notes.append("MA20>MA60 (+10)")
@@ -230,7 +214,7 @@ def analyze(m: Metrics) -> Dict:
 
 
 # ------------------------
-# 支撐 / 壓力估算（技術線 + 近 N 日極值）
+# 支撐 / 壓力（保留）
 # ------------------------
 def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
     d = df.dropna().tail(lookback)
@@ -268,76 +252,40 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
 
 
 # ------------------------
-# 成交量分布（近 N 日）: POC / VAH / VAL
+# 跳空解讀
 # ------------------------
-def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Optional[Dict[str, float]]:
-    """
-    用近 N 日的「典型價」HLC3 與日量，做簡化的量價分布。
-    回傳：
-      POC：控制價（成交量最高的價帶中心）
-      VAL / VAH：覆蓋 70% 成交量的價值區間
-    備註：沒有分價逐筆，這是近似法，但在日線級別實務上仍有參考性。
-    """
-    try:
-        d = df.dropna().tail(lookback)
-        if d.empty:
-            return None
-        typical_price = (d["High"] + d["Low"] + d["Close"]) / 3.0
-        vol = d["Volume"].fillna(0)
+def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
+    if gap_pct is None:
+        return "無法計算跳空。"
+    s = "跳空上漲（Gap Up）" if gap_pct > 0 else ("跳空下跌（Gap Down）" if gap_pct < 0 else "無跳空")
+    mag = abs(gap_pct)
+    strength = "輕微"
+    if mag >= 2: strength = "強烈"
+    elif mag >= 1: strength = "偏強"
+    elif mag >= 0.3: strength = "輕微"
+    else: strength = "極小"
 
-        hist, edges = np.histogram(typical_price, bins=bins, weights=vol)
-        if hist.sum() <= 0:
-            return None
-        centers = (edges[:-1] + edges[1:]) / 2.0
+    extra = ""
+    if vol_r5 is not None:
+        if vol_r5 >= 1.3:
+            extra = "，且有放量，延續機率提高。"
+        elif vol_r5 <= 0.8:
+            extra = "，但量縮，隔日回補缺口機率較高。"
 
-        # POC
-        poc_idx = int(np.argmax(hist))
-        poc = float(centers[poc_idx])
-
-        # 70% 價值區（簡化：從 POC 往兩側擴展直到覆蓋 70% 成交量）
-        total = hist.sum()
-        target = total * 0.7
-        picked = hist[poc_idx]
-        left, right = poc_idx, poc_idx
-        while picked < target:
-            # 往成交量較大的一側擴張
-            left_val = hist[left - 1] if left - 1 >= 0 else -1
-            right_val = hist[right + 1] if right + 1 < len(hist) else -1
-            if right_val >= left_val and right + 1 < len(hist):
-                right += 1
-                picked += hist[right]
-            elif left - 1 >= 0:
-                left -= 1
-                picked += hist[left]
-            else:
-                break
-
-        val = float(centers[left])
-        vah = float(centers[right])
-        return {"POC": poc, "VAL": val, "VAH": vah}
-    except Exception:
-        return None
+    return f"{s}：{gap_pct:.2f}%（{strength}）{extra}"
 
 
 # ------------------------
-# RSI / 布林 訊號 & 風控（ATR%）
+# 個人倉位 / 風控（保留）
 # ------------------------
-def rsi_status(rsi_value: Optional[float]) -> str:
-    if rsi_value is None: return "—"
-    if rsi_value >= 70: return f"{rsi_value:.2f}（超買）"
-    if rsi_value <= 30: return f"{rsi_value:.2f}（超賣）"
-    return f"{rsi_value:.2f}（中性）"
-
-def bollinger_signal(m: Metrics) -> str:
-    if any(v is None for v in [m.close, m.BB_UP, m.BB_LOW, m.BB_MID]): return "—"
-    if m.close > m.BB_UP: return "收盤在上軌外（強勢突破）"
-    if m.close < m.BB_LOW: return "收盤在下軌外（超跌/恐慌）"
-    up_gap = (m.BB_UP - m.close) / m.close
-    low_gap = (m.close - m.BB_LOW) / m.close
-    tips = []
-    if 0 <= up_gap <= 0.005: tips.append("貼近上軌（偏多）")
-    if 0 <= low_gap <= 0.005: tips.append("貼近下軌（偏空）")
-    return "；".join(tips) if tips else "軌道內整理"
+def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
+    if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
+        return {}
+    diff = m.close - avg_cost
+    ret_pct = diff / avg_cost * 100
+    shares = lots * 1000.0
+    unrealized = diff * shares
+    return {"ret_pct": ret_pct, "unrealized": unrealized, "shares": shares, "lots": lots}
 
 def risk_budget_hint(atr_pct: Optional[float]) -> str:
     if atr_pct is None or np.isnan(atr_pct):
@@ -349,19 +297,6 @@ def risk_budget_hint(atr_pct: Optional[float]) -> str:
     if atr_pct >= 1.5:
         return "風控：波動中等（ATR≈{:.1f}%），建議單筆風險 **1.0%–1.5%**".format(atr_pct)
     return "風控：波動低（ATR≈{:.1f}%），建議單筆風險 **1.5%–2.0%**".format(atr_pct)
-
-
-# ------------------------
-# 個人倉位與動作建議（含張數判斷 & 代碼顯示）
-# ------------------------
-def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
-    if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
-        return {}
-    diff = m.close - avg_cost
-    ret_pct = diff / avg_cost * 100
-    shares = lots * 1000.0  # 台股 1 張 = 1000 股
-    unrealized = diff * shares
-    return {"ret_pct": ret_pct, "unrealized": unrealized, "shares": shares, "lots": lots}
 
 def personalized_action(symbol: str,
                         short_score: int, swing_score: int,
@@ -390,7 +325,6 @@ def personalized_action(symbol: str,
             return "**回測支撐不破可小量加碼**"
         return "**先觀察支撐，必要時再加碼**（單筆勿過重）"
 
-    # 依損益狀態
     if ret >= 15:
         msg.append(f"目前獲利約 {ret:.1f}%，{sell_phrase()}。")
     elif ret >= 8:
@@ -410,7 +344,6 @@ def personalized_action(symbol: str,
     else:
         msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{buy_phrase()}。")
 
-    # 技術總結
     if short_score >= 65 and swing_score >= 65:
         msg.append("技術面：短線/波段皆偏多，可**續抱**或" + buy_phrase() + "。")
     elif short_score < 50 and swing_score < 50:
@@ -418,9 +351,7 @@ def personalized_action(symbol: str,
     else:
         msg.append("技術面：訊號分歧，採**分批操作**並嚴守支撐/停損。")
 
-    # 動態風控
     msg.append(risk_budget_hint(atr_pct))
-
     return " ".join(msg)
 
 
@@ -436,8 +367,7 @@ period = st.selectbox("抓取區間", ["6mo", "1y", "2y"], index=0, help="用來
 
 cA, cB, cC = st.columns(3)
 with cA:
-    if st.button("🔎 抓取資料", use_container_width=True):
-        st.session_state["fetch"] = True
+    fetch_now = st.button("🔎 抓取資料", use_container_width=True)  # 直接觸發一次就抓
 with cB:
     if st.button("🧹 清空/重置", use_container_width=True):
         for k in list(st.session_state.keys()):
@@ -450,7 +380,7 @@ st.markdown("### ⌨️ 手動輸入 / 覆寫（可留空） & 個人倉位")
 
 left, right = st.columns(2)
 
-# 手動覆寫技術欄位（保留）
+# 手動覆寫（保留）
 with left:
     st.markdown("**技術欄位**（留空則使用自動計算值）")
     def num_input(label, init):
@@ -466,7 +396,7 @@ with left:
                 pass
     st.session_state["metrics"] = current
 
-# 個人倉位：純文字輸入
+# 個人倉位
 with right:
     st.markdown("**個人倉位（可選）**")
     avg_cost_str = st.text_input("平均成本價（每股）", value="")
@@ -484,8 +414,8 @@ with right:
     except:
         lots = None
 
-# 抓資料
-if st.session_state.get("fetch"):
+# 一鍵抓資料（當次點擊即執行）
+if fetch_now:
     code = symbol.strip().upper()
     if code.isdigit():
         code = code + ".TW"
@@ -498,7 +428,7 @@ if st.session_state.get("fetch"):
             m = latest_metrics(tech)
             st.session_state["metrics"] = asdict(m)
             st.session_state["tech_df"] = tech
-            st.session_state["symbol_final"] = code  # 存代碼以供建議顯示
+            st.session_state["symbol_final"] = code
             st.success("已自動擷取最新技術數據 ✅")
             st.dataframe(tech.tail(5))
     except Exception as e:
@@ -525,33 +455,13 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(result["notes"])
             st.json(result["inputs"])
 
-        # 📊 當日價量區塊（中文 VWAP）
+        # ✅ 當日價量：只留 VWAP 與 跳空，並提供跳空解讀
         st.subheader("📊 當日價量")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("當日漲跌幅", "-" if m.chg_pct is None else f"{m.chg_pct:.2f}%")
-            st.metric("量比(5)", "-" if m.vol_r5 is None else f"{m.vol_r5:.2f}x")
-        with col2:
-            st.metric("量比(20)", "-" if m.vol_r20 is None else f"{m.vol_r20:.2f}x")
-            st.metric("量能Z(20)", "-" if m.vol_z20 is None else f"{m.vol_z20:.2f}")
-        with col3:
-            st.metric("日內區間", "-" if m.range_pct is None else f"{m.range_pct:.2f}%")
-            st.metric("收盤位階(0-1)", "-" if m.close_pos is None else f"{m.close_pos:.2f}")
         st.caption("成交量加權平均價（VWAP，近似）：{}".format("-" if m.vwap_approx is None else f"{m.vwap_approx:.2f}"))
         st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
+        st.info(interpret_gap(m.gap_pct, m.vol_r5))
 
-        hints = []
-        if (m.chg_pct is not None) and (m.vol_r5 is not None) and (m.close_pos is not None):
-            if m.chg_pct > 0 and m.vol_r5 >= 1.3 and m.close_pos >= 0.6:
-                hints.append("多方健康：上漲且放量、收盤靠上緣。")
-            if m.chg_pct > 0 and (m.vol_r5 < 0.9 or m.close_pos <= 0.4):
-                hints.append("留意假突破：上漲但量弱或收在下半。")
-            if m.chg_pct < 0 and (m.vol_r5 is not None) and m.vol_r5 < 0.9:
-                hints.append("健康回檔：下跌且量縮，觀察支撐。")
-        if hints:
-            st.info("；".join(hints))
-
-        # 📦 成交量分布（近 60 日）
+        # 支撐/壓力 + RSI/布林/ATR（保留）
         tech = st.session_state.get("tech_df")
         atr_pct = None
         if tech is not None and "ATR14_pct" in tech.columns:
@@ -561,22 +471,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                 atr_pct = None
 
         if tech is not None:
-            st.subheader("🧱 成交量分布（近 60 日）")
-            vp = volume_profile(tech, lookback=60, bins=24)
-            if vp:
-                st.markdown(f"- **控制價（POC）**：{vp['POC']:.2f}")
-                st.markdown(f"- **價值區（70%）**：{vp['VAL']:.2f} ~ {vp['VAH']:.2f}")
-                # 方位提示
-                if (m.close is not None) and (vp["POC"] is not None):
-                    if m.close >= vp["POC"]:
-                        st.success("收盤在控制價上方，短線偏多。")
-                    else:
-                        st.warning("收盤在控制價下方，短線偏弱，留意回測。")
-            else:
-                st.write("（資料不足，無法估算成交量分布）")
-
-            # 📍 支撐 / 壓力 估算
-            st.subheader("📍 支撐 / 壓力 估算（技術線）")
+            st.subheader("📍 支撐 / 壓力 估算")
             lv = estimate_levels(tech, m)
             colS, colR = st.columns(2)
             with colS:
@@ -589,16 +484,22 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.subheader("🧭 RSI / 布林通道 / 波動度")
             colX, colY, colZ = st.columns(3)
             with colX:
-                st.markdown(f"**RSI(14)**：{rsi_status(m.RSI14)}")
+                st.markdown(f"**RSI(14)**：{('-' if m.RSI14 is None else f'{m.RSI14:.2f}')}")
             with colY:
-                st.markdown(f"**布林帶**：{bollinger_signal(m)}")
+                # 簡要布林說明
+                if None in (m.close, m.BB_UP, m.BB_LOW, m.BB_MID):
+                    st.markdown("**布林帶**：—")
+                else:
+                    if m.close > m.BB_UP:
+                        st.markdown("**布林帶**：收在上軌外（強勢）")
+                    elif m.close < m.BB_LOW:
+                        st.markdown("**布林帶**：收在下軌外（超跌）")
+                    else:
+                        st.markdown("**布林帶**：軌道內整理")
             with colZ:
                 st.markdown(f"**ATR(14)%**：{('-' if atr_pct is None else f'{atr_pct:.2f}%')}")
 
-        else:
-            st.info("尚未抓取技術序列，僅顯示建議分數。")
-
-        # 個人化持倉輸出（含張數邏輯 + 代碼）
+        # 個人化建議
         pa = position_analysis(m, avg_cost, lots)
         st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
         if pa:
@@ -611,6 +512,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.success(suggestion)
         else:
             st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
