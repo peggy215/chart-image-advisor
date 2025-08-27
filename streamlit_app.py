@@ -172,96 +172,43 @@ def latest_metrics(df: pd.DataFrame) -> Metrics:
 
 
 # ------------------------
-# 技術面評分（保留）
+# 當日 POC（分時） & 區間 POC（日線）
 # ------------------------
-def analyze(m: Metrics) -> Dict:
-    notes: List[str] = []
-    def gt(a, b): return (a is not None and b is not None and a > b)
-    def lt(a, b): return (a is not None and b is not None and a < b)
+def session_poc_from_intraday(symbol: str, bins: int = 40, tz: str = "Asia/Taipei") -> Optional[float]:
+    """
+    以分時資料計算「當日 POC」：
+    對今日每根分時K的典型價(HLC3)做加權直方圖（權重=分時成交量）找最大值。
+    """
+    try:
+        for interval in ["1m", "5m"]:
+            df = yf.download(symbol, period="7d", interval=interval, progress=False)
+            if df is None or df.empty:
+                continue
 
-    short_score, swing_score = 50, 50
-    if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5 (+8)")
-    if gt(m.close, m.MA10): short_score += 8; notes.append("收盤>MA10 (+8)")
-    if gt(m.MA5, m.MA10): short_score += 6; notes.append("MA5>MA10 (+6)")
-    if gt(m.volume, m.MV5): short_score += 6; notes.append("量>MV5 (+6)")
-    if m.K is not None and m.D is not None and m.K > m.D: short_score += 8; notes.append("K>D (+8)")
-    if m.K is not None and m.K < 30: short_score += 4; notes.append("K<30 (+4)")
-    if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: short_score += 6; notes.append("DIF>MACD (+6)")
-    if lt(m.close, m.MA20): short_score -= 6; notes.append("收盤<MA20 (-6)")
-    if lt(m.volume, m.MV20): short_score -= 4; notes.append("量<MV20 (-4)")
+            idx = df.index
+            if getattr(idx, "tz", None) is None:
+                idx = idx.tz_localize("UTC")
+            df.index = idx.tz_convert(tz)
 
-    if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
-    if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
-    if gt(m.MA20, m.MA60): swing_score += 10; notes.append("MA20>MA60 (+10)")
-    if gt(m.close, m.MA120): swing_score += 8; notes.append("收盤>MA120 (+8)")
-    if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: swing_score += 6; notes.append("DIF>MACD (+6)")
-    if m.DIF is not None and m.DIF > 0: swing_score += 4; notes.append("DIF>0 (+4)")
-    if lt(m.close, m.MA60): swing_score -= 8; notes.append("收盤<MA60 (-8)")
-    if lt(m.MA20, m.MA60): swing_score -= 8; notes.append("MA20<MA60 (-8)")
-    if m.DIF is not None and m.MACD is not None and m.DIF < m.MACD: swing_score -= 6; notes.append("DIF<MACD (-6)")
+            today = pd.Timestamp.now(tz).normalize()
+            dft = df[(df.index >= today) & (df.index < today + pd.Timedelta(days=1))]
+            if dft.empty:
+                continue
 
-    def verdict(score: int):
-        if score >= 65: return "BUY / 加碼", "偏多，可分批買進或續抱"
-        elif score >= 50: return "HOLD / 觀望", "中性，等突破或訊號"
-        else: return "SELL / 減碼", "偏空，逢反彈減碼或停損"
+            tp = (dft["High"] + dft["Low"] + dft["Close"]) / 3.0
+            vol = dft["Volume"].fillna(0)
 
-    return {
-        "short": {"score": short_score, "decision": verdict(short_score)},
-        "swing": {"score": swing_score, "decision": verdict(swing_score)},
-        "notes": notes,
-        "inputs": asdict(m)
-    }
+            hist, edges = np.histogram(tp, bins=bins, weights=vol)
+            if hist.sum() <= 0:
+                continue
+            centers = (edges[:-1] + edges[1:]) / 2.0
+            return float(centers[np.argmax(hist)])
+    except Exception:
+        pass
+    return None
 
-
-# ------------------------
-# 支撐 / 壓力（保留）
-# ------------------------
-def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
-    d = df.dropna().tail(lookback)
-    return {
-        "recent_high": float(d["High"].max()) if not d.empty else None,
-        "recent_low": float(d["Low"].min()) if not d.empty else None,
-    }
-
-def pick_levels(price: float, candidates_below: list, candidates_above: list, k: int = 2):
-    supports = [x for x in candidates_below if x is not None and x < price]
-    resistances = [x for x in candidates_above if x is not None and x > price]
-    supports = sorted(supports, key=lambda x: price - x)[:k]
-    resistances = sorted(resistances, key=lambda x: x - price)[:k]
-    return supports, resistances
-
-def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
-    lv20 = recent_levels(tech, 20)
-    lv60 = recent_levels(tech, 60)
-
-    short_below = [m.MA5, m.MA10, lv20.get("recent_low")]
-    short_above = [m.MA20, lv20.get("recent_high")]
-
-    swing_below = [m.MA20, m.MA60, lv60.get("recent_low")]
-    swing_above = [m.MA60, m.MA120, lv60.get("recent_high")]
-
-    s_sup, s_res = pick_levels(m.close, short_below, short_above, k=2)
-    w_sup, w_res = pick_levels(m.close, swing_below, swing_above, k=2)
-
-    return {
-        "short_supports": s_sup,
-        "short_resistances": s_res,
-        "swing_supports": w_sup,
-        "swing_resistances": w_res,
-    }
-
-
-# ------------------------
-# 成交量分布（近 N 日）: POC / VAH / VAL
-# ------------------------
 def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Optional[Dict[str, float]]:
-    """
-    用近 N 日的「典型價」HLC3 與日量，做簡化量價分布。
-    回傳：
-      POC：控制價（成交量最高的價帶中心）
-      VAL / VAH：覆蓋 70% 成交量的價值區間
-    （沒有分價逐筆時的近似法，日線級別仍具參考性）
-    """
+    """近 N 日（日線）量價分布：POC / VAL / VAH（70%價值區）。"""
     try:
         d = df.dropna().tail(lookback)
         if d.empty:
@@ -274,11 +221,9 @@ def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Opti
             return None
         centers = (edges[:-1] + edges[1:]) / 2.0
 
-        # POC
         poc_idx = int(np.argmax(hist))
         poc = float(centers[poc_idx])
 
-        # 70% 價值區（從 POC 往兩側擴展）
         total = hist.sum()
         target = total * 0.7
         picked = hist[poc_idx]
@@ -296,6 +241,104 @@ def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Opti
         return {"POC": poc, "VAL": val, "VAH": vah}
     except Exception:
         return None
+
+
+# ------------------------
+# 技術面評分（+ POC）
+# ------------------------
+def analyze(m: Metrics,
+            poc_today: Optional[float] = None,
+            poc_60: Optional[float] = None) -> Dict:
+    notes: List[str] = []
+    def gt(a, b): return (a is not None and b is not None and a > b)
+    def lt(a, b): return (a is not None and b is not None and a < b)
+
+    short_score, swing_score = 50, 50
+    # 原有短線
+    if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5 (+8)")
+    if gt(m.close, m.MA10): short_score += 8; notes.append("收盤>MA10 (+8)")
+    if gt(m.MA5, m.MA10): short_score += 6; notes.append("MA5>MA10 (+6)")
+    if gt(m.volume, m.MV5): short_score += 6; notes.append("量>MV5 (+6)")
+    if m.K is not None and m.D is not None and m.K > m.D: short_score += 8; notes.append("K>D (+8)")
+    if m.K is not None and m.K < 30: short_score += 4; notes.append("K<30 (+4)")
+    if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: short_score += 6; notes.append("DIF>MACD (+6)")
+    if lt(m.close, m.MA20): short_score -= 6; notes.append("收盤<MA20 (-6)")
+    if lt(m.volume, m.MV20): short_score -= 4; notes.append("量<MV20 (-4)")
+    # 新增：當日 POC
+    if poc_today is not None:
+        if m.close is not None and m.close > poc_today:
+            short_score += 6; notes.append("收盤>當日POC (+6)")
+        elif m.close is not None and m.close < poc_today:
+            short_score -= 6; notes.append("收盤<當日POC (-6)")
+
+    # 原有波段
+    if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
+    if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
+    if gt(m.MA20, m.MA60): swing_score += 10; notes.append("MA20>MA60 (+10)")
+    if gt(m.close, m.MA120): swing_score += 8; notes.append("收盤>MA120 (+8)")
+    if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: swing_score += 6; notes.append("DIF>MACD (+6)")
+    if m.DIF is not None and m.DIF > 0: swing_score += 4; notes.append("DIF>0 (+4)")
+    if lt(m.close, m.MA60): swing_score -= 8; notes.append("收盤<MA60 (-8)")
+    if lt(m.MA20, m.MA60): swing_score -= 8; notes.append("MA20<MA60 (-8)")
+    if m.DIF is not None and m.MACD is not None and m.DIF < m.MACD: swing_score -= 6; notes.append("DIF<MACD (-6)")
+    # 新增：60日 POC
+    if poc_60 is not None:
+        if m.close is not None and m.close > poc_60:
+            swing_score += 6; notes.append("收盤>60日POC (+6)")
+        elif m.close is not None and m.close < poc_60:
+            swing_score -= 6; notes.append("收盤<60日POC (-6)")
+
+    def verdict(score: int):
+        if score >= 65: return "BUY / 加碼", "偏多，可分批買進或續抱"
+        elif score >= 50: return "HOLD / 觀望", "中性，等突破或訊號"
+        else: return "SELL / 減碼", "偏空，逢反彈減碼或停損"
+
+    return {
+        "short": {"score": short_score, "decision": verdict(short_score)},
+        "swing": {"score": swing_score, "decision": verdict(swing_score)},
+        "notes": notes,
+        "inputs": asdict(m)
+    }
+
+
+# ------------------------
+# 支撐 / 壓力（含 POC）
+# ------------------------
+def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
+    d = df.dropna().tail(lookback)
+    return {
+        "recent_high": float(d["High"].max()) if not d.empty else None,
+        "recent_low": float(d["Low"].min()) if not d.empty else None,
+    }
+
+def pick_levels(price: float, candidates_below: list, candidates_above: list, k: int = 2):
+    supports = [x for x in candidates_below if x is not None and x < price]
+    resistances = [x for x in candidates_above if x is not None and x > price]
+    supports = sorted(supports, key=lambda x: price - x)[:k]
+    resistances = sorted(resistances, key=lambda x: x - price)[:k]
+    return supports, resistances
+
+def estimate_levels(tech: pd.DataFrame, m: Metrics,
+                    poc_today: Optional[float], poc_60: Optional[float]) -> Dict[str, list]:
+    lv20 = recent_levels(tech, 20)
+    lv60 = recent_levels(tech, 60)
+
+    # 把當日 POC 當短線候選、60日 POC 當波段候選
+    short_below = [m.MA5, m.MA10, poc_today, lv20.get("recent_low")]
+    short_above = [m.MA20, poc_today, lv20.get("recent_high")]
+
+    swing_below = [m.MA20, m.MA60, poc_60, lv60.get("recent_low")]
+    swing_above = [m.MA60, m.MA120, poc_60, lv60.get("recent_high")]
+
+    s_sup, s_res = pick_levels(m.close, short_below, short_above, k=2)
+    w_sup, w_res = pick_levels(m.close, swing_below, swing_above, k=2)
+
+    return {
+        "short_supports": s_sup,
+        "short_resistances": s_res,
+        "swing_supports": w_sup,
+        "swing_resistances": w_res,
+    }
 
 
 # ------------------------
@@ -323,7 +366,7 @@ def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
 
 
 # ------------------------
-# 個人倉位 / 風控（保留）
+# 個人倉位 / 風控
 # ------------------------
 def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
     if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
@@ -405,16 +448,16 @@ def personalized_action(symbol: str,
 # ------------------------
 # UI
 # ------------------------
-st.set_page_config(page_title="Chart Advisor — 台股代碼直抓（含持倉）", layout="centered")
-st.title("📈 Chart Advisor — 台股代碼直抓版（含持倉分析）")
-st.caption("輸入台股代碼（如 2330），自動抓 Yahoo 數據；保留手動覆寫；可輸入平均成本與庫存張數，產生個人化建議。")
+st.set_page_config(page_title="Chart Advisor — 台股代碼直抓（含POC評分）", layout="centered")
+st.title("📈 Chart Advisor — 台股代碼直抓（含 POC 納入評分/支撐）")
+st.caption("輸入台股代碼（如 2330），自動抓 Yahoo 數據；內建當日/60日 POC、VWAP（近似）、跳空解讀、支撐/壓力與個人化建議。")
 
 symbol = st.text_input("台股代碼 / Yahoo 代碼", value="2330", help="台股四位數代碼，例如 2330；或輸入完整 Yahoo 代碼，如 2330.TW")
 period = st.selectbox("抓取區間", ["6mo", "1y", "2y"], index=0, help="用來計算均線/指標的歷史天數")
 
 cA, cB, cC = st.columns(3)
 with cA:
-    fetch_now = st.button("🔎 抓取資料", use_container_width=True)  # 一次點擊就抓
+    fetch_now = st.button("🔎 抓取資料", use_container_width=True)
 with cB:
     if st.button("🧹 清空/重置", use_container_width=True):
         for k in list(st.session_state.keys()):
@@ -427,7 +470,7 @@ st.markdown("### ⌨️ 手動輸入 / 覆寫（可留空） & 個人倉位")
 
 left, right = st.columns(2)
 
-# 手動覆寫（保留）
+# 手動覆寫（可留空）
 with left:
     st.markdown("**技術欄位**（留空則使用自動計算值）")
     def num_input(label, init):
@@ -461,7 +504,7 @@ with right:
     except:
         lots = None
 
-# 一鍵抓資料（當次點擊即執行）
+# 抓資料
 if fetch_now:
     code = symbol.strip().upper()
     if code.isdigit():
@@ -487,8 +530,19 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         st.warning("請先抓取資料或手動輸入至少部分欄位。")
     else:
         m = Metrics(**st.session_state["metrics"])
-        result = analyze(m)
         code_display = st.session_state.get("symbol_final", symbol)
+
+        # 取得 POC：優先當日，其次 60 日
+        poc_today = session_poc_from_intraday(code_display)
+        tech = st.session_state.get("tech_df")
+        poc_60 = None
+        if tech is not None:
+            vp = volume_profile(tech, lookback=60, bins=24)
+            if vp and "POC" in vp:
+                poc_60 = vp["POC"]
+
+        # 分數（含 POC）
+        result = analyze(m, poc_today=poc_today, poc_60=poc_60)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -502,21 +556,15 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(result["notes"])
             st.json(result["inputs"])
 
-        # ✅ 當日價量：VWAP + POC + 跳空
+        # 當日價量：VWAP + POC + 跳空
         st.subheader("📊 當日價量")
         st.caption("成交量加權平均價（VWAP，近似）：{}".format("-" if m.vwap_approx is None else f"{m.vwap_approx:.2f}"))
-        # 近 60 日成交量分布 POC
-        tech = st.session_state.get("tech_df")
-        poc_txt = "-"
-        if tech is not None:
-            vp = volume_profile(tech, lookback=60, bins=24)
-            if vp and "POC" in vp:
-                poc_txt = f"{vp['POC']:.2f}"
-        st.caption(f"控制價（POC，近60日）：{poc_txt}")
+        st.caption("控制價（POC，當日）：{}".format("-" if poc_today is None else f"{poc_today:.2f}"))
+        st.caption("控制價（POC，近60日）：{}".format("-" if poc_60 is None else f"{poc_60:.2f}"))
         st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
         st.info(interpret_gap(m.gap_pct, m.vol_r5))
 
-        # 支撐/壓力 + RSI/布林/ATR（保留）
+        # 支撐 / 壓力（把 POC 納入候選）
         atr_pct = None
         if tech is not None and "ATR14_pct" in tech.columns:
             try:
@@ -526,7 +574,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
 
         if tech is not None:
             st.subheader("📍 支撐 / 壓力 估算")
-            lv = estimate_levels(tech, m)
+            lv = estimate_levels(tech, m, poc_today, poc_60)
             colS, colR = st.columns(2)
             with colS:
                 st.markdown("**短線支撐**： " + (", ".join([f"{x:.2f}" for x in lv["short_supports"]]) if lv["short_supports"] else "-"))
@@ -552,7 +600,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             with colZ:
                 st.markdown(f"**ATR(14)%**：{('-' if atr_pct is None else f'{atr_pct:.2f}%')}")
 
-        # 個人化建議
+        # 個人化持倉建議
         pa = position_analysis(m, avg_cost, lots)
         st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
         if pa:
