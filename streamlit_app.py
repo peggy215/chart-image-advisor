@@ -61,13 +61,32 @@ def calc_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
         (high - close_prev).abs(),
         (low - close_prev).abs()
     ], axis=1).max(axis=1)
-    # Wilder's ATR（這裡用 SMA 也可）
-    atr = tr.rolling(n).mean()
-    return atr
+    # 這裡用簡單 SMA（也可改 Wilder's RMA）
+    return tr.rolling(n).mean()
+
+def flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if isinstance(out.columns, pd.MultiIndex):
+        # 單標的情境：把第一層(Open/High/Low/Close/Volume...)取出
+        try:
+            out.columns = out.columns.get_level_values(0)
+        except Exception:
+            # 若為多標的，取第一個標的
+            first_symbol = out.columns.levels[1][0]
+            out = out.xs(key=first_symbol, axis=1, level=1, drop_level=True)
+    return out
 
 def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out = out.rename(columns=str.title)  # Open/High/Low/Close/Adj Close/Volume
+    # 1) 扁平化欄位
+    out = flatten_columns_if_needed(df)
+
+    # 2) 正規化欄名
+    out = out.rename(columns=lambda s: str(s).strip().title())  # Open/High/Low/Close/Adj Close/Volume
+
+    # 3) 轉為數字避免運算回傳 DataFrame
+    for c in ["Open", "High", "Low", "Close", "Volume"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
 
     # 均線、均量
     for n in [5, 10, 20, 60, 120, 240]:
@@ -98,8 +117,8 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out["BB_LOW"] = bb_mid - 2 * bb_std
 
     # ATR(14) 與 ATR%
-    out["ATR14"] = calc_atr(out, 14)
-    out["ATR14_pct"] = (out["ATR14"] / out["Close"]) * 100
+    out["ATR14"] = calc_atr(out, 14)                 # Series
+    out["ATR14_pct"] = (out["ATR14"] / out["Close"]) * 100  # Series / Series → Series
 
     return out
 
@@ -252,17 +271,14 @@ def personalized_action(symbol: str,
                         m: Metrics, pa: Dict[str, float],
                         atr_pct: Optional[float]) -> str:
     lots = pa.get("lots", 0) if pa else 0
-    # 開頭標的
     header = f"標的— "
 
-    # 未輸入持倉時
     if not pa:
         return header + "未輸入成本/庫存：先依技術面執行。 " + risk_budget_hint(atr_pct)
 
     ret = pa["ret_pct"]
     msg = [header]
 
-    # 依張數做不同分批語氣
     def sell_phrase():
         if lots >= 3:
             return "逢壓力**分批減碼 20%–30%**"
@@ -277,7 +293,7 @@ def personalized_action(symbol: str,
             return "**回測支撐不破可小量加碼**"
         return "**先觀察支撐，必要時再加碼**（單筆勿過重）"
 
-    # 先看損益狀態
+    # 依損益狀態
     if ret >= 15:
         msg.append(f"目前獲利約 {ret:.1f}%，{sell_phrase()}。")
     elif ret >= 8:
@@ -286,18 +302,18 @@ def personalized_action(symbol: str,
         msg.append(f"小幅獲利 {ret:.1f}%，優先**守 MA5/MA10**；跌破則降風險。")
     elif ret <= -10:
         if lots >= 2:
-            msg.append(f"虧損 {ret:.1f}%，建議**嚴設停損**或反彈**大幅減碼（至少 1 張）**。")
+            msg.append(f"虧損 {ret:.1f}%，**嚴設停損**或反彈**大幅減碼（至少 1 張）**。")
         else:
-            msg.append(f"虧損 {ret:.1f}%，建議**嚴設停損**或反彈**出清**。")
+            msg.append(f"虧損 {ret:.1f}%，**嚴設停損**或反彈**出清**。")
     elif ret <= -5:
         if lots >= 2:
-            msg.append(f"虧損 {ret:.1f}%，建議**反彈先減 1 張**，避免擴大。")
+            msg.append(f"虧損 {ret:.1f}%，**反彈先減 1 張**，避免擴大。")
         else:
-            msg.append(f"虧損 {ret:.1f}%，建議**反彈減碼或出清**，避免擴大。")
+            msg.append(f"虧損 {ret:.1f}%，**反彈減碼或出清**，避免擴大。")
     else:
         msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{buy_phrase()}。")
 
-    # 再加上技術總結
+    # 技術總結
     if short_score >= 65 and swing_score >= 65:
         msg.append("技術面：短線/波段皆偏多，可**續抱**或" + buy_phrase() + "。")
     elif short_score < 50 and swing_score < 50:
@@ -305,7 +321,7 @@ def personalized_action(symbol: str,
     else:
         msg.append("技術面：訊號分歧，採**分批操作**並嚴守支撐/停損。")
 
-    # 動態風控建議（依 ATR%）
+    # 動態風控
     msg.append(risk_budget_hint(atr_pct))
 
     return " ".join(msg)
@@ -418,7 +434,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         if tech is not None and "ATR14_pct" in tech.columns:
             try:
                 atr_pct = float(tech["ATR14_pct"].dropna().iloc[-1])
-            except:
+            except Exception:
                 atr_pct = None
 
         if tech is not None:
@@ -457,6 +473,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.success(suggestion)
         else:
             st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
