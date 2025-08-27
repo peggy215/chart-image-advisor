@@ -38,13 +38,16 @@ def ema(series: pd.Series, span: int) -> pd.Series:
 def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
+    # Ensure the columns exist
+    out = out.rename(columns=str.title)  # 'Open','High','Low','Close','Adj Close','Volume'
+
     # MAs
     for n in [5, 10, 20, 60, 120, 240]:
         out[f"MA{n}"] = out["Close"].rolling(n).mean()
     for n in [5, 20]:
         out[f"MV{n}"] = out["Volume"].rolling(n).mean()
 
-    # Stochastic (%K, %D) 9,3 (Yahoo/TradingView常見變體)
+    # Stochastic (%K, %D) 9,3
     low9 = out["Low"].rolling(9).min()
     high9 = out["High"].rolling(9).max()
     rsv = (out["Close"] - low9) / (high9 - low9) * 100
@@ -134,6 +137,44 @@ def analyze(m: Metrics) -> Dict:
 
 
 # ------------------------
+# Support / Resistance estimation
+# ------------------------
+def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
+    d = df.dropna().tail(lookback)
+    return {
+        "recent_high": float(d["High"].max()) if not d.empty else None,
+        "recent_low": float(d["Low"].min()) if not d.empty else None,
+    }
+
+def pick_levels(price: float, candidates_below: list, candidates_above: list, k: int = 2):
+    supports = [x for x in candidates_below if x is not None and x < price]
+    resistances = [x for x in candidates_above if x is not None and x > price]
+    supports = sorted(supports, key=lambda x: price - x)[:k]
+    resistances = sorted(resistances, key=lambda x: x - price)[:k]
+    return supports, resistances
+
+def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
+    lv20 = recent_levels(tech, 20)
+    lv60 = recent_levels(tech, 60)
+
+    short_below = [m.MA5, m.MA10, lv20.get("recent_low")]
+    short_above = [m.MA20, lv20.get("recent_high")]
+
+    swing_below = [m.MA20, m.MA60, lv60.get("recent_low")]
+    swing_above = [m.MA60, m.MA120, lv60.get("recent_high")]
+
+    s_sup, s_res = pick_levels(m.close, short_below, short_above, k=2)
+    w_sup, w_res = pick_levels(m.close, swing_below, swing_above, k=2)
+
+    return {
+        "short_supports": s_sup,
+        "short_resistances": s_res,
+        "swing_supports": w_sup,
+        "swing_resistances": w_res,
+    }
+
+
+# ------------------------
 # UI
 # ------------------------
 st.set_page_config(page_title="Chart Advisor — 台股代碼直抓版", layout="centered")
@@ -156,19 +197,17 @@ metrics = Metrics()
 
 if st.session_state.get("fetch"):
     code = symbol.strip().upper()
-    # 補 .TW
     if code.isdigit():
         code = code + ".TW"
     try:
-        # 多抓一些以計算 MA240
         hist = yf.download(code, period="2y" if period=="6mo" else period, interval="1d", progress=False)
         if hist is None or hist.empty:
             st.error("抓不到此代碼的資料，請確認代碼是否正確（例如 2330 或 2330.TW）。")
         else:
-            hist = hist.rename(columns=str.title)  # make 'Close', 'Open', etc.
             tech = calc_technicals(hist)
             m = latest_metrics(tech)
             st.session_state["metrics"] = asdict(m)
+            st.session_state["tech_df"] = tech
             st.success("已自動擷取最新技術數據 ✅")
             st.dataframe(tech.tail(5))
     except Exception as e:
@@ -208,3 +247,18 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         with st.expander("判斷依據 / 輸入數據"):
             st.write(result["notes"])
             st.json(result["inputs"])
+
+        # 支撐/壓力估算
+        tech = st.session_state.get("tech_df")
+        if tech is not None:
+            st.subheader("📍 支撐 / 壓力 估算")
+            lv = estimate_levels(tech, m)
+            colS, colR = st.columns(2)
+            with colS:
+                st.markdown("**短線支撐**： " + (", ".join([f"{x:.2f}" for x in lv["short_supports"]]) if lv["short_supports"] else "-"))
+                st.markdown("**波段支撐**： " + (", ".join([f"{x:.2f}" for x in lv["swing_supports"]]) if lv["swing_supports"] else "-"))
+            with colR:
+                st.markdown("**短線壓力**： " + (", ".join([f"{x:.2f}" for x in lv["short_resistances"]]) if lv["short_resistances"] else "-"))
+                st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
+        else:
+            st.info("尚未抓取技術序列，僅顯示建議分數。")
