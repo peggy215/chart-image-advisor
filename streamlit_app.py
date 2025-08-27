@@ -40,14 +40,14 @@ class Metrics:
     open: Optional[float] = None
     high: Optional[float] = None
     low: Optional[float] = None
-    chg_pct: Optional[float] = None   # 當日漲跌幅 %
-    vol_r5: Optional[float] = None    # Volume / MV5
-    vol_r20: Optional[float] = None   # Volume / MV20
-    vol_z20: Optional[float] = None   # (Vol - mean20) / std20
-    range_pct: Optional[float] = None # (High-Low)/Close %
-    close_pos: Optional[float] = None # (Close-Low)/(High-Low) 0~1
-    gap_pct: Optional[float] = None   # (Open-PrevClose)/PrevClose %
-    vwap_approx: Optional[float] = None  # 成交量加權平均價（近似，HLC3）
+    chg_pct: Optional[float] = None   # (Close/PrevClose-1)*100
+    vol_r5: Optional[float] = None
+    vol_r20: Optional[float] = None
+    vol_z20: Optional[float] = None
+    range_pct: Optional[float] = None
+    close_pos: Optional[float] = None
+    gap_pct: Optional[float] = None
+    vwap_approx: Optional[float] = None  # (H+L+C)/3
 
 
 # ------------------------
@@ -75,7 +75,7 @@ def calc_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
         (high - close_prev).abs(),
         (low - close_prev).abs()
     ], axis=1).max(axis=1)
-    return tr.rolling(n).mean()  # 簡單 SMA
+    return tr.rolling(n).mean()
 
 def flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -252,6 +252,53 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
 
 
 # ------------------------
+# 成交量分布（近 N 日）: POC / VAH / VAL
+# ------------------------
+def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Optional[Dict[str, float]]:
+    """
+    用近 N 日的「典型價」HLC3 與日量，做簡化量價分布。
+    回傳：
+      POC：控制價（成交量最高的價帶中心）
+      VAL / VAH：覆蓋 70% 成交量的價值區間
+    （沒有分價逐筆時的近似法，日線級別仍具參考性）
+    """
+    try:
+        d = df.dropna().tail(lookback)
+        if d.empty:
+            return None
+        typical_price = (d["High"] + d["Low"] + d["Close"]) / 3.0
+        vol = d["Volume"].fillna(0)
+
+        hist, edges = np.histogram(typical_price, bins=bins, weights=vol)
+        if hist.sum() <= 0:
+            return None
+        centers = (edges[:-1] + edges[1:]) / 2.0
+
+        # POC
+        poc_idx = int(np.argmax(hist))
+        poc = float(centers[poc_idx])
+
+        # 70% 價值區（從 POC 往兩側擴展）
+        total = hist.sum()
+        target = total * 0.7
+        picked = hist[poc_idx]
+        left, right = poc_idx, poc_idx
+        while picked < target:
+            left_val = hist[left - 1] if left - 1 >= 0 else -1
+            right_val = hist[right + 1] if right + 1 < len(hist) else -1
+            if right_val >= left_val and right + 1 < len(hist):
+                right += 1; picked += hist[right]
+            elif left - 1 >= 0:
+                left -= 1; picked += hist[left]
+            else:
+                break
+        val = float(centers[left]); vah = float(centers[right])
+        return {"POC": poc, "VAL": val, "VAH": vah}
+    except Exception:
+        return None
+
+
+# ------------------------
 # 跳空解讀
 # ------------------------
 def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
@@ -367,7 +414,7 @@ period = st.selectbox("抓取區間", ["6mo", "1y", "2y"], index=0, help="用來
 
 cA, cB, cC = st.columns(3)
 with cA:
-    fetch_now = st.button("🔎 抓取資料", use_container_width=True)  # 直接觸發一次就抓
+    fetch_now = st.button("🔎 抓取資料", use_container_width=True)  # 一次點擊就抓
 with cB:
     if st.button("🧹 清空/重置", use_container_width=True):
         for k in list(st.session_state.keys()):
@@ -455,14 +502,21 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(result["notes"])
             st.json(result["inputs"])
 
-        # ✅ 當日價量：只留 VWAP 與 跳空，並提供跳空解讀
+        # ✅ 當日價量：VWAP + POC + 跳空
         st.subheader("📊 當日價量")
         st.caption("成交量加權平均價（VWAP，近似）：{}".format("-" if m.vwap_approx is None else f"{m.vwap_approx:.2f}"))
+        # 近 60 日成交量分布 POC
+        tech = st.session_state.get("tech_df")
+        poc_txt = "-"
+        if tech is not None:
+            vp = volume_profile(tech, lookback=60, bins=24)
+            if vp and "POC" in vp:
+                poc_txt = f"{vp['POC']:.2f}"
+        st.caption(f"控制價（POC，近60日）：{poc_txt}")
         st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
         st.info(interpret_gap(m.gap_pct, m.vol_r5))
 
         # 支撐/壓力 + RSI/布林/ATR（保留）
-        tech = st.session_state.get("tech_df")
         atr_pct = None
         if tech is not None and "ATR14_pct" in tech.columns:
             try:
@@ -486,7 +540,6 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             with colX:
                 st.markdown(f"**RSI(14)**：{('-' if m.RSI14 is None else f'{m.RSI14:.2f}')}")
             with colY:
-                # 簡要布林說明
                 if None in (m.close, m.BB_UP, m.BB_LOW, m.BB_MID):
                     st.markdown("**布林帶**：—")
                 else:
@@ -512,6 +565,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.success(suggestion)
         else:
             st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
