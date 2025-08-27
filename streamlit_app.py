@@ -1,21 +1,13 @@
-
 # streamlit_app.py
 # -*- coding: utf-8 -*-
-import json
-import re
+import math
 from dataclasses import dataclass, asdict
-from typing import Optional
+from typing import Optional, Dict
 
+import pandas as pd
+import numpy as np
+import yfinance as yf
 import streamlit as st
-
-# Optional OCR deps
-try:
-    import cv2
-    import numpy as np
-    import pytesseract
-    OCR_AVAILABLE = True
-except Exception:
-    OCR_AVAILABLE = False
 
 
 @dataclass
@@ -32,84 +24,75 @@ class Metrics:
     MV20: Optional[float] = None
     K: Optional[float] = None
     D: Optional[float] = None
-    MACD: Optional[float] = None
-    DIF: Optional[float] = None
-    OSC: Optional[float] = None
+    MACD: Optional[float] = None  # signal
+    DIF: Optional[float] = None   # macd main
+    OSC: Optional[float] = None   # histogram
 
 
-def _to_float(s):
-    try:
-        return float(str(s).replace(',', ''))
-    except Exception:
-        return None
+# ------------------------
+# Technicals
+# ------------------------
+def ema(series: pd.Series, span: int) -> pd.Series:
+    return series.ewm(span=span, adjust=False).mean()
+
+def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    # MAs
+    for n in [5, 10, 20, 60, 120, 240]:
+        out[f"MA{n}"] = out["Close"].rolling(n).mean()
+    for n in [5, 20]:
+        out[f"MV{n}"] = out["Volume"].rolling(n).mean()
+
+    # Stochastic (%K, %D) 9,3 (Yahoo/TradingView常見變體)
+    low9 = out["Low"].rolling(9).min()
+    high9 = out["High"].rolling(9).max()
+    rsv = (out["Close"] - low9) / (high9 - low9) * 100
+    k = rsv.rolling(3).mean()
+    d = k.rolling(3).mean()
+    out["K"] = k
+    out["D"] = d
+
+    # MACD (12,26,9)
+    dif = ema(out["Close"], 12) - ema(out["Close"], 26)
+    macd = ema(dif, 9)
+    osc = dif - macd
+    out["DIF"] = dif
+    out["MACD"] = macd
+    out["OSC"] = osc
+
+    return out
 
 
-KEY_PATTERNS = [
-    (r'MA\s*5[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA5'),
-    (r'MA5[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA5'),
-    (r'MA\s*10[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA10'),
-    (r'MA10[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA10'),
-    (r'MA\s*20[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA20'),
-    (r'MA20[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA20'),
-    (r'MA\s*60[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA60'),
-    (r'MA60[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA60'),
-    (r'MA\s*120[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA120'),
-    (r'MA120[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA120'),
-    (r'MA\s*240[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA240'),
-    (r'MA240[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MA240'),
-    (r'MV\s*5[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MV5'),
-    (r'MV5[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MV5'),
-    (r'MV\s*20[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MV20'),
-    (r'MV20[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MV20'),
-    (r'K9?[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'K'),
-    (r'K值[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'K'),
-    (r'D9?[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'D'),
-    (r'D值[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'D'),
-    (r'MACD9?[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MACD'),
-    (r'MACD[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'MACD'),
-    (r'DIF[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'DIF'),
-    (r'OSC[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'OSC'),
-    (r'收盤?[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'close'),
-    (r'量(?:\(張\))?[:：]?\s*([\-+]?\d+(?:\.\d+)?)', 'volume'),
-]
+def latest_metrics(df: pd.DataFrame) -> Metrics:
+    last = df.dropna().iloc[-1]
+    m = Metrics(
+        close=float(last["Close"]),
+        volume=float(last["Volume"]),
+        MA5=float(last["MA5"]),
+        MA10=float(last["MA10"]),
+        MA20=float(last["MA20"]),
+        MA60=float(last["MA60"]),
+        MA120=float(last["MA120"]),
+        MA240=float(last["MA240"]),
+        MV5=float(last["MV5"]),
+        MV20=float(last["MV20"]),
+        K=float(last["K"]),
+        D=float(last["D"]),
+        MACD=float(last["MACD"]),
+        DIF=float(last["DIF"]),
+        OSC=float(last["OSC"]),
+    )
+    return m
 
 
-def ocr_parse_metrics(image_bytes) -> Metrics:
-    if not OCR_AVAILABLE:
-        return Metrics()
-    # Read image bytes to cv2 image
-    file_bytes = np.asarray(bytearray(image_bytes.read()), dtype=np.uint8)
-    img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if img is None:
-        return Metrics()
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 3)
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    try:
-        text = pytesseract.image_to_string(
-            bw, config=r'--oem 3 --psm 6 -l eng+chi_sim+chi_tra'
-        )
-    except Exception:
-        text = ""
-    metrics = Metrics()
-    for pat, key in KEY_PATTERNS:
-        m = re.search(pat, text, flags=re.IGNORECASE)
-        if m:
-            val = _to_float(m.group(1))
-            if val is not None:
-                setattr(metrics, key, val)
-    return metrics
-
-
-def analyze(m: Metrics):
+def analyze(m: Metrics) -> Dict:
     notes = []
 
-    def gt(a, b): 
+    def gt(a, b):
         return (a is not None and b is not None and a > b)
 
-    def lt(a, b): 
+    def lt(a, b):
         return (a is not None and b is not None and a < b)
 
     short_score = 50
@@ -145,63 +128,83 @@ def analyze(m: Metrics):
     return {
         "short": {"score": short_score, "decision": verdict(short_score)},
         "swing": {"score": swing_score, "decision": verdict(swing_score)},
-        "notes": notes
+        "notes": notes,
+        "inputs": asdict(m)
     }
 
 
-st.set_page_config(page_title="Chart Image Advisor", layout="centered")
-st.title("📈 Chart Image Advisor — 圖像讀取 + 短線/波段建議")
+# ------------------------
+# UI
+# ------------------------
+st.set_page_config(page_title="Chart Advisor — 台股代碼直抓版", layout="centered")
+st.title("📈 Chart Advisor — 台股代碼直抓版")
+st.caption("輸入台股代碼（例如 2330、2317、3231），自動抓 Yahoo 數據；亦可於右側覆寫手動輸入。")
 
-uploaded = st.file_uploader("上傳當日股票圖（PNG/JPG）", type=["png", "jpg", "jpeg"])
+symbol = st.text_input("台股代碼 / Yahoo 代碼", value="2330", help="台股四位數代碼，例如 2330；或輸入完整 Yahoo 代碼，如 2330.TW")
+period = st.selectbox("抓取區間", ["6mo", "1y", "2y"], index=0, help="用來計算均線/指標的歷史天數")
+
+colA, colB = st.columns(2)
+with colA:
+    if st.button("🔎 抓取資料", use_container_width=True):
+        st.session_state["fetch"] = True
+with colB:
+    if st.button("🧹 清空/重置", use_container_width=True):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
 
 metrics = Metrics()
 
-col1, col2 = st.columns(2)
-with col1:
-    st.markdown("### 🧠 方式 A：自動 OCR 解析")
-    if uploaded is not None:
-        st.image(uploaded, caption="已上傳的截圖", use_column_width=True)
-        if st.button("嘗試 OCR 解析", use_container_width=True):
-            parsed = ocr_parse_metrics(uploaded)
-            st.session_state["parsed"] = asdict(parsed)
-    parsed_state = st.session_state.get("parsed")
-    if parsed_state:
-        st.success("OCR 擷取成功：")
-        st.json(parsed_state)
-        metrics = Metrics(**parsed_state)
+if st.session_state.get("fetch"):
+    code = symbol.strip().upper()
+    # 補 .TW
+    if code.isdigit():
+        code = code + ".TW"
+    try:
+        # 多抓一些以計算 MA240
+        hist = yf.download(code, period="2y" if period=="6mo" else period, interval="1d", progress=False)
+        if hist is None or hist.empty:
+            st.error("抓不到此代碼的資料，請確認代碼是否正確（例如 2330 或 2330.TW）。")
+        else:
+            hist = hist.rename(columns=str.title)  # make 'Close', 'Open', etc.
+            tech = calc_technicals(hist)
+            m = latest_metrics(tech)
+            st.session_state["metrics"] = asdict(m)
+            st.success("已自動擷取最新技術數據 ✅")
+            st.dataframe(tech.tail(5))
+    except Exception as e:
+        st.error(f"擷取失敗：{e}")
 
-with col2:
-    st.markdown("### ⌨️ 方式 B：手動輸入/覆寫")
-    def num_input(label, value):
-        return st.text_input(label, value if value is not None else "", placeholder="例如 936 或 33590")
+# 手動輸入/覆寫
+st.markdown("---")
+st.markdown("### ⌨️ 手動輸入 / 覆寫（可留空）")
+def num_input(label, init):
+    return st.text_input(label, value=(("" if init is None else str(init))))
 
-    for field in metrics.__dataclass_fields__.keys():
-        cur = getattr(metrics, field)
-        val = num_input(field, "" if cur is None else str(cur))
-        if val.strip():
-            setattr(metrics, field, _to_float(val))
+current = st.session_state.get("metrics", {})
+for field in Metrics().__dataclass_fields__.keys():
+    cur = current.get(field)
+    val = num_input(field, cur)
+    if val.strip():
+        try:
+            current[field] = float(val.replace(",", ""))
+        except:
+            pass
+st.session_state["metrics"] = current
 
 st.markdown("---")
-if st.button("產生建議", type="primary", use_container_width=True):
-    result = analyze(metrics)
-    st.subheader("🔎 分析結果")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric("短線分數", result["short"]["score"])
-        st.success(f"短線建議：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
-    with c2:
-        st.metric("波段分數", result["swing"]["score"])
-        st.info(f"波段建議：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
-
-    with st.expander("判斷依據（Notes）"):
-        for n in result["notes"]:
-            st.write("•", n)
-
-    st.download_button(
-        "下載 JSON 結果",
-        data=json.dumps(result, ensure_ascii=False, indent=2),
-        file_name="analysis_output.json",
-        mime="application/json"
-    )
-
-st.caption("提示：OCR 需要本機安裝 Tesseract。若擷取不完整，請於右側輸入框手動補值後再按「產生建議」。")
+if st.button("🚀 產生建議", type="primary", use_container_width=True):
+    if not st.session_state.get("metrics"):
+        st.warning("請先抓取資料或手動輸入至少部分欄位。")
+    else:
+        m = Metrics(**st.session_state["metrics"])
+        result = analyze(m)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("短線分數", result["short"]["score"])
+            st.success(f"短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
+        with c2:
+            st.metric("波段分數", result["swing"]["score"])
+            st.info(f"波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
+        with st.expander("判斷依據 / 輸入數據"):
+            st.write(result["notes"])
+            st.json(result["inputs"])
