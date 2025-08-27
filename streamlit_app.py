@@ -50,7 +50,7 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
 
 def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    out = out.rename(columns=str.title)
+    out = out.rename(columns=str.title)  # Open/High/Low/Close/Adj Close/Volume
 
     # 均線、均量
     for n in [5, 10, 20, 60, 120, 240]:
@@ -58,22 +58,22 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     for n in [5, 20]:
         out[f"MV{n}"] = out["Volume"].rolling(n).mean()
 
-    # KD
+    # KD (9,3,3)
     low9 = out["Low"].rolling(9).min()
     high9 = out["High"].rolling(9).max()
     rsv = (out["Close"] - low9) / (high9 - low9) * 100
     out["K"] = rsv.rolling(3).mean()
     out["D"] = out["K"].rolling(3).mean()
 
-    # MACD
+    # MACD (12,26,9)
     dif = ema(out["Close"], 12) - ema(out["Close"], 26)
     macd = ema(dif, 9)
     out["DIF"], out["MACD"], out["OSC"] = dif, macd, dif - macd
 
-    # RSI
+    # RSI(14)
     out["RSI14"] = rsi(out["Close"], 14)
 
-    # 布林通道
+    # 布林通道 (20, 2σ)
     bb_mid = out["Close"].rolling(20).mean()
     bb_std = out["Close"].rolling(20).std(ddof=0)
     out["BB_MID"] = bb_mid
@@ -100,7 +100,7 @@ def latest_metrics(df: pd.DataFrame) -> Metrics:
 
 
 # ------------------------
-# 技術面分析
+# 技術面分析（評分）
 # ------------------------
 def analyze(m: Metrics) -> Dict:
     notes: List[str] = []
@@ -109,25 +109,26 @@ def analyze(m: Metrics) -> Dict:
 
     short_score, swing_score = 50, 50
     # 短線評分
-    if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5")
-    if gt(m.close, m.MA10): short_score += 8
-    if gt(m.MA5, m.MA10): short_score += 6
-    if gt(m.volume, m.MV5): short_score += 6
-    if m.K and m.D and m.K > m.D: short_score += 8
-    if m.K and m.K < 30: short_score += 4
-    if m.DIF and m.MACD and m.DIF > m.MACD: short_score += 6
-    if lt(m.close, m.MA20): short_score -= 6
-    if lt(m.volume, m.MV20): short_score -= 4
+    if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5 (+8)")
+    if gt(m.close, m.MA10): short_score += 8; notes.append("收盤>MA10 (+8)")
+    if gt(m.MA5, m.MA10): short_score += 6; notes.append("MA5>MA10 (+6)")
+    if gt(m.volume, m.MV5): short_score += 6; notes.append("量>MV5 (+6)")
+    if m.K is not None and m.D is not None and m.K > m.D: short_score += 8; notes.append("K>D (+8)")
+    if m.K is not None and m.K < 30: short_score += 4; notes.append("K<30 (+4)")
+    if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: short_score += 6; notes.append("DIF>MACD (+6)")
+    if lt(m.close, m.MA20): short_score -= 6; notes.append("收盤<MA20 (-6)")
+    if lt(m.volume, m.MV20): short_score -= 4; notes.append("量<MV20 (-4)")
+
     # 波段評分
-    if gt(m.close, m.MA20): swing_score += 10
-    if gt(m.close, m.MA60): swing_score += 10
-    if gt(m.MA20, m.MA60): swing_score += 10
-    if gt(m.close, m.MA120): swing_score += 8
-    if m.DIF and m.MACD and m.DIF > m.MACD: swing_score += 6
-    if m.DIF and m.DIF > 0: swing_score += 4
-    if lt(m.close, m.MA60): swing_score -= 8
-    if lt(m.MA20, m.MA60): swing_score -= 8
-    if m.DIF and m.MACD and m.DIF < m.MACD: swing_score -= 6
+    if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
+    if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
+    if gt(m.MA20, m.MA60): swing_score += 10; notes.append("MA20>MA60 (+10)")
+    if gt(m.close, m.MA120): swing_score += 8; notes.append("收盤>MA120 (+8)")
+    if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: swing_score += 6; notes.append("DIF>MACD (+6)")
+    if m.DIF is not None and m.DIF > 0: swing_score += 4; notes.append("DIF>0 (+4)")
+    if lt(m.close, m.MA60): swing_score -= 8; notes.append("收盤<MA60 (-8)")
+    if lt(m.MA20, m.MA60): swing_score -= 8; notes.append("MA20<MA60 (-8)")
+    if m.DIF is not None and m.MACD is not None and m.DIF < m.MACD: swing_score -= 6; notes.append("DIF<MACD (-6)")
 
     def verdict(score: int):
         if score >= 65: return "BUY / 加碼", "偏多，可分批買進或續抱"
@@ -143,64 +144,16 @@ def analyze(m: Metrics) -> Dict:
 
 
 # ------------------------
-# RSI / 布林訊號
+# 支撐 / 壓力估算
 # ------------------------
-def rsi_status(rsi_value: Optional[float]) -> str:
-    if rsi_value is None: return "—"
-    if rsi_value >= 70: return f"{rsi_value:.2f}（超買）"
-    if rsi_value <= 30: return f"{rsi_value:.2f}（超賣）"
-    return f"{rsi_value:.2f}（中性）"
+def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
+    d = df.dropna().tail(lookback)
+    return {
+        "recent_high": float(d["High"].max()) if not d.empty else None,
+        "recent_low": float(d["Low"].min()) if not d.empty else None,
+    }
 
-def bollinger_signal(m: Metrics) -> str:
-    if not all([m.close, m.BB_UP, m.BB_LOW, m.BB_MID]): return "—"
-    if m.close > m.BB_UP: return "收盤在上軌外（強勢突破）"
-    if m.close < m.BB_LOW: return "收盤在下軌外（超跌/恐慌）"
-    return "軌道內整理"
-
-
-# ------------------------
-# 個人倉位
-# ------------------------
-def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
-    if not avg_cost or avg_cost <= 0 or not lots or lots <= 0: return {}
-    diff = m.close - avg_cost
-    ret = diff / avg_cost * 100
-    shares = lots * 1000
-    return {"ret_pct": ret, "unrealized": diff * shares, "shares": shares}
-
-
-# ------------------------
-# UI
-# ------------------------
-st.set_page_config(page_title="Chart Advisor", layout="centered")
-st.title("📈 Chart Advisor — 台股代碼直抓版（含持倉分析）")
-
-symbol = st.text_input("輸入台股代碼", value="2330")
-avg_cost = st.number_input("平均成本價", min_value=0.0, value=0.0, step=0.1)
-lots = st.number_input("庫存張數", min_value=0.0, value=0.0, step=1.0)
-
-if st.button("🔎 抓取 & 分析"):
-    code = symbol.strip().upper()
-    if code.isdigit(): code += ".TW"
-    hist = yf.download(code, period="1y", interval="1d", progress=False)
-    if hist.empty:
-        st.error("抓不到資料，請檢查代碼")
-    else:
-        tech = calc_technicals(hist)
-        m = latest_metrics(tech)
-        result = analyze(m)
-
-        st.metric("短線分數", result["short"]["score"])
-        st.metric("波段分數", result["swing"]["score"])
-        st.write(result["short"]["decision"], result["swing"]["decision"])
-        st.write("RSI(14)：", rsi_status(m.RSI14))
-        st.write("布林帶：", bollinger_signal(m))
-
-        pa = position_analysis(m, avg_cost, lots)
-        if pa:
-            st.subheader("👤 個人持倉")
-            st.write(f"平均成本 {avg_cost}, 現價 {m.close:.2f}, 報酬率 {pa['ret_pct']:.2f}%")
-            st.write(f"未實現損益 {pa['unrealized']:.0f} 元，持有 {pa['shares']:.0f} 股")
+def pick_levels
 
 
 
