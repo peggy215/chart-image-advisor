@@ -1,7 +1,7 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import pandas as pd
 import numpy as np
@@ -47,6 +47,7 @@ class Metrics:
     range_pct: Optional[float] = None # (High-Low)/Close %
     close_pos: Optional[float] = None # (Close-Low)/(High-Low) 0~1
     gap_pct: Optional[float] = None   # (Open-PrevClose)/PrevClose %
+    vwap_approx: Optional[float] = None  # 成交量加權平均價（近似，HLC3）
 
 
 # ------------------------
@@ -145,6 +146,9 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out["ClosePos"] = np.where(rng > 0, (out["Close"] - out["Low"]) / rng, np.nan)
     out["GapPct"] = (out["Open"] / out["PrevClose"] - 1.0) * 100.0
 
+    # 成交量加權平均價（近似）：常用 HLC3 作為日內近似
+    out["VWAP_Approx"] = (out["High"] + out["Low"] + out["Close"]) / 3.0
+
     return out
 
 
@@ -177,6 +181,7 @@ def latest_metrics(df: pd.DataFrame) -> Metrics:
         chg_pct=g("ChgPct"),
         vol_r5=g("VolR5"), vol_r20=g("VolR20"), vol_z20=g("VolZ20"),
         range_pct=g("RangePct"), close_pos=g("ClosePos"), gap_pct=g("GapPct"),
+        vwap_approx=g("VWAP_Approx"),
     )
 
 
@@ -225,7 +230,7 @@ def analyze(m: Metrics) -> Dict:
 
 
 # ------------------------
-# 支撐 / 壓力估算
+# 支撐 / 壓力估算（技術線 + 近 N 日極值）
 # ------------------------
 def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
     d = df.dropna().tail(lookback)
@@ -260,6 +265,58 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
         "swing_supports": w_sup,
         "swing_resistances": w_res,
     }
+
+
+# ------------------------
+# 成交量分布（近 N 日）: POC / VAH / VAL
+# ------------------------
+def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Optional[Dict[str, float]]:
+    """
+    用近 N 日的「典型價」HLC3 與日量，做簡化的量價分布。
+    回傳：
+      POC：控制價（成交量最高的價帶中心）
+      VAL / VAH：覆蓋 70% 成交量的價值區間
+    備註：沒有分價逐筆，這是近似法，但在日線級別實務上仍有參考性。
+    """
+    try:
+        d = df.dropna().tail(lookback)
+        if d.empty:
+            return None
+        typical_price = (d["High"] + d["Low"] + d["Close"]) / 3.0
+        vol = d["Volume"].fillna(0)
+
+        hist, edges = np.histogram(typical_price, bins=bins, weights=vol)
+        if hist.sum() <= 0:
+            return None
+        centers = (edges[:-1] + edges[1:]) / 2.0
+
+        # POC
+        poc_idx = int(np.argmax(hist))
+        poc = float(centers[poc_idx])
+
+        # 70% 價值區（簡化：從 POC 往兩側擴展直到覆蓋 70% 成交量）
+        total = hist.sum()
+        target = total * 0.7
+        picked = hist[poc_idx]
+        left, right = poc_idx, poc_idx
+        while picked < target:
+            # 往成交量較大的一側擴張
+            left_val = hist[left - 1] if left - 1 >= 0 else -1
+            right_val = hist[right + 1] if right + 1 < len(hist) else -1
+            if right_val >= left_val and right + 1 < len(hist):
+                right += 1
+                picked += hist[right]
+            elif left - 1 >= 0:
+                left -= 1
+                picked += hist[left]
+            else:
+                break
+
+        val = float(centers[left])
+        vah = float(centers[right])
+        return {"POC": poc, "VAL": val, "VAH": vah}
+    except Exception:
+        return None
 
 
 # ------------------------
@@ -468,7 +525,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(result["notes"])
             st.json(result["inputs"])
 
-        # 📊 當日價量區塊
+        # 📊 當日價量區塊（中文 VWAP）
         st.subheader("📊 當日價量")
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -480,6 +537,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         with col3:
             st.metric("日內區間", "-" if m.range_pct is None else f"{m.range_pct:.2f}%")
             st.metric("收盤位階(0-1)", "-" if m.close_pos is None else f"{m.close_pos:.2f}")
+        st.caption("成交量加權平均價（VWAP，近似）：{}".format("-" if m.vwap_approx is None else f"{m.vwap_approx:.2f}"))
         st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
 
         hints = []
@@ -493,7 +551,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         if hints:
             st.info("；".join(hints))
 
-        # 支撐/壓力估算 + RSI/布林 + ATR%
+        # 📦 成交量分布（近 60 日）
         tech = st.session_state.get("tech_df")
         atr_pct = None
         if tech is not None and "ATR14_pct" in tech.columns:
@@ -503,7 +561,22 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                 atr_pct = None
 
         if tech is not None:
-            st.subheader("📍 支撐 / 壓力 估算")
+            st.subheader("🧱 成交量分布（近 60 日）")
+            vp = volume_profile(tech, lookback=60, bins=24)
+            if vp:
+                st.markdown(f"- **控制價（POC）**：{vp['POC']:.2f}")
+                st.markdown(f"- **價值區（70%）**：{vp['VAL']:.2f} ~ {vp['VAH']:.2f}")
+                # 方位提示
+                if (m.close is not None) and (vp["POC"] is not None):
+                    if m.close >= vp["POC"]:
+                        st.success("收盤在控制價上方，短線偏多。")
+                    else:
+                        st.warning("收盤在控制價下方，短線偏弱，留意回測。")
+            else:
+                st.write("（資料不足，無法估算成交量分布）")
+
+            # 📍 支撐 / 壓力 估算
+            st.subheader("📍 支撐 / 壓力 估算（技術線）")
             lv = estimate_levels(tech, m)
             colS, colR = st.columns(2)
             with colS:
