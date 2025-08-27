@@ -51,6 +51,20 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     rsi_val = 100 - (100 / (1 + rs))
     return rsi_val.fillna(50)
 
+def calc_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    # True Range
+    high = df["High"]
+    low = df["Low"]
+    close_prev = df["Close"].shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - close_prev).abs(),
+        (low - close_prev).abs()
+    ], axis=1).max(axis=1)
+    # Wilder's ATR（這裡用 SMA 也可）
+    atr = tr.rolling(n).mean()
+    return atr
+
 def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out = out.rename(columns=str.title)  # Open/High/Low/Close/Adj Close/Volume
@@ -82,6 +96,10 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out["BB_MID"] = bb_mid
     out["BB_UP"] = bb_mid + 2 * bb_std
     out["BB_LOW"] = bb_mid - 2 * bb_std
+
+    # ATR(14) 與 ATR%
+    out["ATR14"] = calc_atr(out, 14)
+    out["ATR14_pct"] = (out["ATR14"] / out["Close"]) * 100
 
     return out
 
@@ -185,7 +203,7 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
 
 
 # ------------------------
-# RSI / 布林 訊號文字
+# RSI / 布林 訊號文字 & 風控建議（動態）
 # ------------------------
 def rsi_status(rsi_value: Optional[float]) -> str:
     if rsi_value is None: return "—"
@@ -205,9 +223,20 @@ def bollinger_signal(m: Metrics) -> str:
     if 0 <= low_gap <= 0.005: tips.append("貼近下軌（偏空）")
     return "；".join(tips) if tips else "軌道內整理"
 
+def risk_budget_hint(atr_pct: Optional[float]) -> str:
+    if atr_pct is None or np.isnan(atr_pct):
+        return "風控：建議單筆風險 1%–2%（波動度無法取得）"
+    if atr_pct >= 5:
+        return "風控：波動大（ATR≈{:.1f}%），建議單筆風險 **0.5%–0.8%**".format(atr_pct)
+    if atr_pct >= 3:
+        return "風控：波動偏大（ATR≈{:.1f}%），建議單筆風險 **0.8%–1.2%**".format(atr_pct)
+    if atr_pct >= 1.5:
+        return "風控：波動中等（ATR≈{:.1f}%），建議單筆風險 **1.0%–1.5%**".format(atr_pct)
+    return "風控：波動低（ATR≈{:.1f}%），建議單筆風險 **1.5%–2.0%**".format(atr_pct)
+
 
 # ------------------------
-# 個人倉位與動作建議
+# 個人倉位與動作建議（含張數判斷 & 代碼顯示）
 # ------------------------
 def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
     if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
@@ -216,34 +245,69 @@ def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[floa
     ret_pct = diff / avg_cost * 100
     shares = lots * 1000.0  # 台股 1 張 = 1000 股
     unrealized = diff * shares
-    return {"ret_pct": ret_pct, "unrealized": unrealized, "shares": shares}
+    return {"ret_pct": ret_pct, "unrealized": unrealized, "shares": shares, "lots": lots}
 
-def personalized_action(short_score: int, swing_score: int, m: Metrics, pa: Dict[str, float]) -> str:
+def personalized_action(symbol: str,
+                        short_score: int, swing_score: int,
+                        m: Metrics, pa: Dict[str, float],
+                        atr_pct: Optional[float]) -> str:
+    lots = pa.get("lots", 0) if pa else 0
+    # 開頭標的
+    header = f"標的— "
+
+    # 未輸入持倉時
     if not pa:
-        return "未輸入成本/庫存：僅依技術面建議執行。"
+        return header + "未輸入成本/庫存：先依技術面執行。 " + risk_budget_hint(atr_pct)
+
     ret = pa["ret_pct"]
-    msg = []
+    msg = [header]
+
+    # 依張數做不同分批語氣
+    def sell_phrase():
+        if lots >= 3:
+            return "逢壓力**分批減碼 20%–30%**"
+        if lots >= 2:
+            return "逢壓力**先賣 1 張**，其餘續抱"
+        return "逢壓力**可考慮全數賣出**或視情況續抱"
+
+    def buy_phrase():
+        if lots >= 3:
+            return "**逢回測支撐不破小幅加碼（不追高）**"
+        if lots == 2:
+            return "**回測支撐不破可小量加碼**"
+        return "**先觀察支撐，必要時再加碼**（單筆勿過重）"
+
+    # 先看損益狀態
     if ret >= 15:
-        msg.append(f"目前獲利約 {ret:.1f}%，逢壓力（MA20/前高）**分批了結 30%–50%**。")
+        msg.append(f"目前獲利約 {ret:.1f}%，{sell_phrase()}。")
     elif ret >= 8:
-        msg.append(f"目前獲利約 {ret:.1f}%，**遇壓力減碼 20%–30%**，其餘續抱看趨勢。")
+        msg.append(f"目前獲利約 {ret:.1f}%，{sell_phrase()}，其餘續抱看趨勢。")
     elif ret > 0:
         msg.append(f"小幅獲利 {ret:.1f}%，優先**守 MA5/MA10**；跌破則降風險。")
     elif ret <= -10:
-        msg.append(f"虧損 {ret:.1f}%，建議**嚴設停損**或反彈**大幅減碼**。")
+        if lots >= 2:
+            msg.append(f"虧損 {ret:.1f}%，建議**嚴設停損**或反彈**大幅減碼（至少 1 張）**。")
+        else:
+            msg.append(f"虧損 {ret:.1f}%，建議**嚴設停損**或反彈**出清**。")
     elif ret <= -5:
-        msg.append(f"虧損 {ret:.1f}%，建議**反彈減碼 20%–40%**，避免虧損擴大。")
+        if lots >= 2:
+            msg.append(f"虧損 {ret:.1f}%，建議**反彈先減 1 張**，避免擴大。")
+        else:
+            msg.append(f"虧損 {ret:.1f}%，建議**反彈減碼或出清**，避免擴大。")
     else:
-        msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整。")
+        msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{buy_phrase()}。")
 
+    # 再加上技術總結
     if short_score >= 65 and swing_score >= 65:
-        msg.append("技術面：短線/波段皆偏多，可**續抱或逢回加碼**（不追高）。")
+        msg.append("技術面：短線/波段皆偏多，可**續抱**或" + buy_phrase() + "。")
     elif short_score < 50 and swing_score < 50:
-        msg.append("技術面：短線/波段皆偏弱，**逢反彈減碼**或換股。")
+        msg.append("技術面：短線/波段皆偏弱，建議**逢反彈減碼**或換股。")
     else:
-        msg.append("技術面：訊號分歧，**分批操作**與**嚴格停損**。")
+        msg.append("技術面：訊號分歧，採**分批操作**並嚴守支撐/停損。")
 
-    msg.append("風控：單筆風險不超過總資金 1%–2%，加碼僅在回測支撐不破時進行。")
+    # 動態風控建議（依 ATR%）
+    msg.append(risk_budget_hint(atr_pct))
+
     return " ".join(msg)
 
 
@@ -279,7 +343,6 @@ with left:
     def num_input(label, init):
         return st.text_input(label, value=(("" if init is None else str(init))))
     current = st.session_state.get("metrics", {})
-    # 依資料類別動態生成欄位
     for field in Metrics().__dataclass_fields__.keys():
         cur = current.get(field)
         val = num_input(field, cur)
@@ -322,6 +385,7 @@ if st.session_state.get("fetch"):
             m = latest_metrics(tech)
             st.session_state["metrics"] = asdict(m)
             st.session_state["tech_df"] = tech
+            st.session_state["symbol_final"] = code  # 存代碼以供建議顯示
             st.success("已自動擷取最新技術數據 ✅")
             st.dataframe(tech.tail(5))
     except Exception as e:
@@ -334,21 +398,29 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
     else:
         m = Metrics(**st.session_state["metrics"])
         result = analyze(m)
+        code_display = st.session_state.get("symbol_final", symbol)
 
         c1, c2 = st.columns(2)
         with c1:
             st.metric("短線分數", result["short"]["score"])
-            st.success(f"短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
+            st.success(f"標的短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
         with c2:
             st.metric("波段分數", result["swing"]["score"])
-            st.info(f"波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
+            st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
 
         with st.expander("判斷依據 / 輸入數據"):
             st.write(result["notes"])
             st.json(result["inputs"])
 
-        # 支撐/壓力估算 + RSI/布林
+        # 支撐/壓力估算 + RSI/布林 + ATR%
         tech = st.session_state.get("tech_df")
+        atr_pct = None
+        if tech is not None and "ATR14_pct" in tech.columns:
+            try:
+                atr_pct = float(tech["ATR14_pct"].dropna().iloc[-1])
+            except:
+                atr_pct = None
+
         if tech is not None:
             st.subheader("📍 支撐 / 壓力 估算")
             lv = estimate_levels(tech, m)
@@ -360,25 +432,32 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                 st.markdown("**短線壓力**： " + (", ".join([f"{x:.2f}" for x in lv["short_resistances"]]) if lv["short_resistances"] else "-"))
                 st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
 
-            st.subheader("🧭 RSI / 布林通道 訊號")
-            colX, colY = st.columns(2)
+            st.subheader("🧭 RSI / 布林通道 / 波動度")
+            colX, colY, colZ = st.columns(3)
             with colX:
                 st.markdown(f"**RSI(14)**：{rsi_status(m.RSI14)}")
             with colY:
                 st.markdown(f"**布林帶**：{bollinger_signal(m)}")
+            with colZ:
+                st.markdown(f"**ATR(14)%**：{('-' if atr_pct is None else f'{atr_pct:.2f}%')}")
+
         else:
             st.info("尚未抓取技術序列，僅顯示建議分數。")
 
-        # 個人化持倉輸出
+        # 個人化持倉輸出（含張數邏輯 + 代碼）
         pa = position_analysis(m, avg_cost, lots)
         st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
         if pa:
+            st.write(f"- 標的：**{code_display}**")
             st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
-            st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {lots} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
-            suggestion = personalized_action(result["short"]["score"], result["swing"]["score"], m, pa)
+            st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
+            suggestion = personalized_action(code_display,
+                                            result["short"]["score"], result["swing"]["score"],
+                                            m, pa, atr_pct)
             st.success(suggestion)
         else:
             st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
