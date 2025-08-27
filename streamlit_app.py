@@ -262,3 +262,4 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                 st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
         else:
             st.info("尚未抓取技術序列，僅顯示建議分數。")
+
