@@ -14,8 +14,10 @@ import streamlit as st
 # ------------------------
 @dataclass
 class Metrics:
+    # 價量
     close: Optional[float] = None
     volume: Optional[float] = None
+    # 均線 / 均量
     MA5: Optional[float] = None
     MA10: Optional[float] = None
     MA20: Optional[float] = None
@@ -24,6 +26,7 @@ class Metrics:
     MA240: Optional[float] = None
     MV5: Optional[float] = None
     MV20: Optional[float] = None
+    # 指標
     K: Optional[float] = None
     D: Optional[float] = None
     MACD: Optional[float] = None    # signal
@@ -33,6 +36,17 @@ class Metrics:
     BB_UP: Optional[float] = None
     BB_MID: Optional[float] = None
     BB_LOW: Optional[float] = None
+    # 當日價量
+    open: Optional[float] = None
+    high: Optional[float] = None
+    low: Optional[float] = None
+    chg_pct: Optional[float] = None   # 當日漲跌幅 %
+    vol_r5: Optional[float] = None    # Volume / MV5
+    vol_r20: Optional[float] = None   # Volume / MV20
+    vol_z20: Optional[float] = None   # (Vol - mean20) / std20
+    range_pct: Optional[float] = None # (High-Low)/Close %
+    close_pos: Optional[float] = None # (Close-Low)/(High-Low) 0~1
+    gap_pct: Optional[float] = None   # (Open-PrevClose)/PrevClose %
 
 
 # ------------------------
@@ -52,7 +66,6 @@ def rsi(series: pd.Series, length: int = 14) -> pd.Series:
     return rsi_val.fillna(50)
 
 def calc_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    # True Range
     high = df["High"]
     low = df["Low"]
     close_prev = df["Close"].shift(1)
@@ -61,17 +74,16 @@ def calc_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
         (high - close_prev).abs(),
         (low - close_prev).abs()
     ], axis=1).max(axis=1)
-    # 這裡用簡單 SMA（也可改 Wilder's RMA）
-    return tr.rolling(n).mean()
+    return tr.rolling(n).mean()  # 簡單 SMA；可改 Wilder's RMA
 
 def flatten_columns_if_needed(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if isinstance(out.columns, pd.MultiIndex):
-        # 單標的情境：把第一層(Open/High/Low/Close/Volume...)取出
+        # 單標的情境：把第一層(Open/High/Low/Close/Volume)取出
         try:
             out.columns = out.columns.get_level_values(0)
         except Exception:
-            # 若為多標的，取第一個標的
+            # 若為多標的，退而求其次取第一個標的
             first_symbol = out.columns.levels[1][0]
             out = out.xs(key=first_symbol, axis=1, level=1, drop_level=True)
     return out
@@ -83,7 +95,7 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     # 2) 正規化欄名
     out = out.rename(columns=lambda s: str(s).strip().title())  # Open/High/Low/Close/Adj Close/Volume
 
-    # 3) 轉為數字避免運算回傳 DataFrame
+    # 3) 轉為數字避免廣播成 DataFrame
     for c in ["Open", "High", "Low", "Close", "Volume"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce")
@@ -117,25 +129,54 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out["BB_LOW"] = bb_mid - 2 * bb_std
 
     # ATR(14) 與 ATR%
-    out["ATR14"] = calc_atr(out, 14)                 # Series
-    out["ATR14_pct"] = (out["ATR14"] / out["Close"]) * 100  # Series / Series → Series
+    out["ATR14"] = calc_atr(out, 14)
+    out["ATR14_pct"] = (out["ATR14"] / out["Close"]) * 100
+
+    # ===== 當日價量 =====
+    out["PrevClose"] = out["Close"].shift(1)
+    out["ChgPct"] = (out["Close"] / out["PrevClose"] - 1.0) * 100.0
+    out["VolR5"] = out["Volume"].div(out["MV5"]).replace([np.inf, -np.inf], np.nan)
+    out["VolR20"] = out["Volume"].div(out["MV20"]).replace([np.inf, -np.inf], np.nan)
+    vol_mean20 = out["Volume"].rolling(20).mean()
+    vol_std20 = out["Volume"].rolling(20).std(ddof=0).replace(0, np.nan)
+    out["VolZ20"] = (out["Volume"] - vol_mean20) / vol_std20
+    out["RangePct"] = (out["High"] - out["Low"]) / out["Close"] * 100.0
+    rng = (out["High"] - out["Low"])
+    out["ClosePos"] = np.where(rng > 0, (out["Close"] - out["Low"]) / rng, np.nan)
+    out["GapPct"] = (out["Open"] / out["PrevClose"] - 1.0) * 100.0
 
     return out
 
 
+def _get_last_float(s: pd.Series) -> Optional[float]:
+    try:
+        v = s.iloc[-1]
+        return float(v) if pd.notna(v) else None
+    except Exception:
+        return None
+
 def latest_metrics(df: pd.DataFrame) -> Metrics:
-    last = df.dropna().iloc[-1]
+    last = df.iloc[-1]  # 不用 dropna，逐欄位取值
+    def g(col: str) -> Optional[float]:
+        try:
+            v = last[col]
+            return float(v) if pd.notna(v) else None
+        except Exception:
+            return None
+
     return Metrics(
-        close=float(last["Close"]),
-        volume=float(last["Volume"]),
-        MA5=float(last["MA5"]), MA10=float(last["MA10"]),
-        MA20=float(last["MA20"]), MA60=float(last["MA60"]),
-        MA120=float(last["MA120"]), MA240=float(last["MA240"]),
-        MV5=float(last["MV5"]), MV20=float(last["MV20"]),
-        K=float(last["K"]), D=float(last["D"]),
-        MACD=float(last["MACD"]), DIF=float(last["DIF"]), OSC=float(last["OSC"]),
-        RSI14=float(last["RSI14"]),
-        BB_UP=float(last["BB_UP"]), BB_MID=float(last["BB_MID"]), BB_LOW=float(last["BB_LOW"])
+        close=g("Close"), volume=g("Volume"),
+        MA5=g("MA5"), MA10=g("MA10"), MA20=g("MA20"),
+        MA60=g("MA60"), MA120=g("MA120"), MA240=g("MA240"),
+        MV5=g("MV5"), MV20=g("MV20"),
+        K=g("K"), D=g("D"),
+        MACD=g("MACD"), DIF=g("DIF"), OSC=g("OSC"),
+        RSI14=g("RSI14"),
+        BB_UP=g("BB_UP"), BB_MID=g("BB_MID"), BB_LOW=g("BB_LOW"),
+        open=g("Open"), high=g("High"), low=g("Low"),
+        chg_pct=g("ChgPct"),
+        vol_r5=g("VolR5"), vol_r20=g("VolR20"), vol_z20=g("VolZ20"),
+        range_pct=g("RangePct"), close_pos=g("ClosePos"), gap_pct=g("GapPct"),
     )
 
 
@@ -222,7 +263,7 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
 
 
 # ------------------------
-# RSI / 布林 訊號文字 & 風控建議（動態）
+# RSI / 布林 訊號 & 風控（ATR%）
 # ------------------------
 def rsi_status(rsi_value: Optional[float]) -> str:
     if rsi_value is None: return "—"
@@ -234,7 +275,6 @@ def bollinger_signal(m: Metrics) -> str:
     if any(v is None for v in [m.close, m.BB_UP, m.BB_LOW, m.BB_MID]): return "—"
     if m.close > m.BB_UP: return "收盤在上軌外（強勢突破）"
     if m.close < m.BB_LOW: return "收盤在下軌外（超跌/恐慌）"
-    # 貼軌提示（±0.5%）
     up_gap = (m.BB_UP - m.close) / m.close
     low_gap = (m.close - m.BB_LOW) / m.close
     tips = []
@@ -428,6 +468,31 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(result["notes"])
             st.json(result["inputs"])
 
+        # 📊 當日價量區塊
+        st.subheader("📊 當日價量")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("當日漲跌幅", "-" if m.chg_pct is None else f"{m.chg_pct:.2f}%")
+            st.metric("量比(5)", "-" if m.vol_r5 is None else f"{m.vol_r5:.2f}x")
+        with col2:
+            st.metric("量比(20)", "-" if m.vol_r20 is None else f"{m.vol_r20:.2f}x")
+            st.metric("量能Z(20)", "-" if m.vol_z20 is None else f"{m.vol_z20:.2f}")
+        with col3:
+            st.metric("日內區間", "-" if m.range_pct is None else f"{m.range_pct:.2f}%")
+            st.metric("收盤位階(0-1)", "-" if m.close_pos is None else f"{m.close_pos:.2f}")
+        st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
+
+        hints = []
+        if (m.chg_pct is not None) and (m.vol_r5 is not None) and (m.close_pos is not None):
+            if m.chg_pct > 0 and m.vol_r5 >= 1.3 and m.close_pos >= 0.6:
+                hints.append("多方健康：上漲且放量、收盤靠上緣。")
+            if m.chg_pct > 0 and (m.vol_r5 < 0.9 or m.close_pos <= 0.4):
+                hints.append("留意假突破：上漲但量弱或收在下半。")
+            if m.chg_pct < 0 and (m.vol_r5 is not None) and m.vol_r5 < 0.9:
+                hints.append("健康回檔：下跌且量縮，觀察支撐。")
+        if hints:
+            st.info("；".join(hints))
+
         # 支撐/壓力估算 + RSI/布林 + ATR%
         tech = st.session_state.get("tech_df")
         atr_pct = None
@@ -473,6 +538,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.success(suggestion)
         else:
             st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
