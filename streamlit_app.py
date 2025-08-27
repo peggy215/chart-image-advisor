@@ -1,6 +1,5 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
-import math
 from dataclasses import dataclass, asdict
 from typing import Optional, Dict
 
@@ -24,9 +23,13 @@ class Metrics:
     MV20: Optional[float] = None
     K: Optional[float] = None
     D: Optional[float] = None
-    MACD: Optional[float] = None  # signal
-    DIF: Optional[float] = None   # macd main
-    OSC: Optional[float] = None   # histogram
+    MACD: Optional[float] = None    # signal
+    DIF: Optional[float] = None     # macd main
+    OSC: Optional[float] = None     # histogram
+    RSI14: Optional[float] = None
+    BB_UP: Optional[float] = None
+    BB_MID: Optional[float] = None
+    BB_LOW: Optional[float] = None
 
 
 # ------------------------
@@ -35,13 +38,22 @@ class Metrics:
 def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
+def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+    # Wilder's RSI
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False).mean()
+    rs = avg_gain / (avg_loss.replace(0, np.nan))
+    rsi_val = 100 - (100 / (1 + rs))
+    return rsi_val.fillna(50)
+
 def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
-    # Ensure the columns exist
     out = out.rename(columns=str.title)  # 'Open','High','Low','Close','Adj Close','Volume'
 
-    # MAs
+    # MAs & MVs
     for n in [5, 10, 20, 60, 120, 240]:
         out[f"MA{n}"] = out["Close"].rolling(n).mean()
     for n in [5, 20]:
@@ -64,6 +76,16 @@ def calc_technicals(df: pd.DataFrame) -> pd.DataFrame:
     out["MACD"] = macd
     out["OSC"] = osc
 
+    # RSI(14)
+    out["RSI14"] = rsi(out["Close"], 14)
+
+    # Bollinger Bands (20, 2σ)
+    bb_mid = out["Close"].rolling(20).mean()
+    bb_std = out["Close"].rolling(20).std(ddof=0)
+    out["BB_MID"] = bb_mid
+    out["BB_UP"]  = bb_mid + 2 * bb_std
+    out["BB_LOW"] = bb_mid - 2 * bb_std
+
     return out
 
 
@@ -85,6 +107,10 @@ def latest_metrics(df: pd.DataFrame) -> Metrics:
         MACD=float(last["MACD"]),
         DIF=float(last["DIF"]),
         OSC=float(last["OSC"]),
+        RSI14=float(last["RSI14"]),
+        BB_UP=float(last["BB_UP"]),
+        BB_MID=float(last["BB_MID"]),
+        BB_LOW=float(last["BB_LOW"]),
     )
     return m
 
@@ -94,10 +120,10 @@ def analyze(m: Metrics) -> Dict:
 
     def gt(a, b):
         return (a is not None and b is not None and a > b)
-
     def lt(a, b):
         return (a is not None and b is not None and a < b)
 
+    # ---- 短線評分 ----
     short_score = 50
     if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5 (+8)")
     if gt(m.close, m.MA10): short_score += 8; notes.append("收盤>MA10 (+8)")
@@ -109,6 +135,7 @@ def analyze(m: Metrics) -> Dict:
     if lt(m.close, m.MA20): short_score -= 6; notes.append("收盤<MA20 (-6)")
     if lt(m.volume, m.MV20): short_score -= 4; notes.append("量<MV20 (-4)")
 
+    # ---- 波段評分 ----
     swing_score = 50
     if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
     if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
@@ -172,6 +199,37 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics) -> Dict[str, list]:
         "swing_supports": w_sup,
         "swing_resistances": w_res,
     }
+
+
+# ------------------------
+# RSI / Bollinger signals
+# ------------------------
+def rsi_status(rsi_value: Optional[float]) -> str:
+    if rsi_value is None:
+        return "—"
+    if rsi_value >= 70: return f"{rsi_value:.2f}（超買）"
+    if rsi_value <= 30: return f"{rsi_value:.2f}（超賣）"
+    return f"{rsi_value:.2f}（中性）"
+
+def bollinger_signal(m: Metrics) -> str:
+    if any(v is None for v in [m.close, m.BB_UP, m.BB_LOW, m.BB_MID]):
+        return "—"
+    msg = []
+    if m.close > m.BB_UP:
+        msg.append("收盤在上軌外（強勢突破）")
+    elif m.close < m.BB_LOW:
+        msg.append("收盤在下軌外（恐慌/超跌）")
+    else:
+        # 判斷貼軌：距離小於 0.5% 視為貼軌
+        up_gap = (m.BB_UP - m.close) / m.close
+        low_gap = (m.close - m.BB_LOW) / m.close
+        if 0 <= up_gap <= 0.005:
+            msg.append("貼近上軌（偏多）")
+        if 0 <= low_gap <= 0.005:
+            msg.append("貼近下軌（偏空）")
+        if not msg:
+            msg.append("軌道內整理")
+    return "；".join(msg)
 
 
 # ------------------------
@@ -260,6 +318,14 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             with colR:
                 st.markdown("**短線壓力**： " + (", ".join([f"{x:.2f}" for x in lv["short_resistances"]]) if lv["short_resistances"] else "-"))
                 st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
+
+            st.subheader("🧭 RSI / 布林通道 訊號")
+            colX, colY = st.columns(2)
+            with colX:
+                st.markdown(f"**RSI(14)**：{rsi_status(m.RSI14)}")
+            with colY:
+                st.markdown(f"**布林帶**：{bollinger_signal(m)}")
         else:
             st.info("尚未抓取技術序列，僅顯示建議分數。")
+
 
