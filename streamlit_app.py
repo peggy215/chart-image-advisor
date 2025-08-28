@@ -1009,8 +1009,8 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
            targets,
            weekly_targets=wk   # 👈 關鍵差異：加入週線目標
         )
-           st.success(suggestion)
-       else:
+        st.success(suggestion)
+        else:
          st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
 
 
