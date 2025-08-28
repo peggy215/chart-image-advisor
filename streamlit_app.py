@@ -717,12 +717,14 @@ def personalized_action(symbol: str,
                         short_score: int, swing_score: int,
                         m: Metrics, pa: Dict[str, float],
                         atr_pct: Optional[float],
-                        targets: Dict) -> str:
+                        targets: Dict,
+                        weekly_targets: Optional[Dict] = None) -> str:
     """
-    納入 mid_targets：
+    已整合『週線目標在 +8% 內 → 減碼少一點、續抱挑戰週線目標』：
       - 逼近短線目標（±1%） → 依張數減碼
       - 逼近波段目標（±1.5%） → 減碼 30–50%
-      - 若技術分數強，且『距離 mid_targets <= 8%』 → 建議僅小幅減碼，嘗試守到 mid（例如 50）
+      - 若存在『週線中長目標』且距離當前價 <= +8%：
+          建議傾向『先小幅減碼（10–20% / 先賣1張），續抱挑戰週線目標』
     """
     def pct_diff(a: float, b: float) -> float:
         if a is None or b is None or b == 0: return np.inf
@@ -738,28 +740,40 @@ def personalized_action(symbol: str,
     ret = pa["ret_pct"]
     msg = [header]
 
-    # 目標價距離判斷
+    # —— 日線目標距離 —— #
     s_targets = targets.get("short_targets") or []
     w_targets = targets.get("swing_targets") or []
-    mid_targets = targets.get("mid_targets") or []
-
     near_short = next((t for t in s_targets if abs(pct_diff(close, t)) <= 1.0), None)
     near_swing = next((t for t in w_targets if abs(pct_diff(close, t)) <= 1.5), None)
-    # 「可望守到 mid」條件：強勢分數 + 最近一個 mid 價落在 +8% 以內
-    mid_within = next((t for t in mid_targets if 0 < pct_diff(t, close) <= 8.0), None)
 
-    # 張數對應句型
+    # —— 週線目標（抓最近且在 +8% 內） —— #
+    wk_list = (weekly_targets or {}).get("mid_targets_weekly") or []
+    wk_within = None
+    if wk_list:
+        wk_above = [t for t in wk_list if t is not None and t > close]
+        wk_above.sort(key=lambda t: t - close)
+        for t in wk_above:
+            if pct_diff(t, close) <= 8.0:
+                wk_within = t
+                break
+
+    # —— 語句模板（依張數） —— #
     def reduce_phrase(weight="20%"):
         if lots >= 3: return f"**分批減碼 {weight}**"
         if lots >= 2: return "**先賣 1 張**"
         return "**可考慮出清**或視情況續抱"
+
+    def small_reduce_phrase():
+        if lots >= 3: return "**小幅減碼 10%–20%**"
+        if lots >= 2: return "**先賣 1 張或更少**"
+        return "**小量賣出或續抱觀察**"
 
     def add_phrase():
         if lots >= 3: return "**回測支撐不破小幅加碼（不追高）**"
         if lots == 2: return "**回測支撐不破可小量加碼**"
         return "**先觀察支撐，必要時再加碼**"
 
-    # 淨損益敘述
+    # —— 淨損益敘述 —— #
     if ret >= 15:
         msg.append(f"目前獲利約 {ret:.1f}%，遇壓力位建議 {reduce_phrase('20%–30%')}。")
     elif ret >= 8:
@@ -775,22 +789,21 @@ def personalized_action(symbol: str,
     else:
         msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{add_phrase()}。")
 
-    # 目標價條件
+    # —— 目標價情境 —— #
     if near_short is not None:
-        # 若還有 mid 近在咫尺且分數偏多 → 先小減，嘗試守到 mid（例如 50）
-        if mid_within is not None and short_score >= 65 and swing_score >= 65:
-            msg.append(f"已逼近短線目標 {near_short:.2f}（±1%），但 **中長距離目標 {mid_within:.2f} 僅距 +8% 內**，建議**小幅減碼**後續抱觀察量能，嘗試守到中長目標。")
+        if wk_within is not None and short_score >= 65 and swing_score >= 65:
+            msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，且週線目標 **{wk_within:.2f}** 在 +8% 內。建議{small_reduce_phrase()}，續抱觀察量能挑戰週線目標。")
         else:
             msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，建議 {reduce_phrase()}，停利拉高至 **前一日低點/MA5**。")
     elif near_swing is not None:
-        if mid_within is not None and swing_score >= 65:
-            msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，可先 {reduce_phrase('20%–30%')}，若量價健康且**中長目標 {mid_within:.2f}** 仍近，可續抱挑戰。")
+        if wk_within is not None and swing_score >= 65:
+            msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，但週線目標 **{wk_within:.2f}** 在 +8% 內，可先{small_reduce_phrase()}；若量價健康再續抱挑戰。")
         else:
             msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，建議 {reduce_phrase('30%–50%')}，其餘視量能續抱。")
     else:
         if short_score >= 65 and swing_score >= 65:
-            if mid_within is not None:
-                msg.append(f"技術面偏多，且 **中長距離目標 {mid_within:.2f}** 在 +8% 內，可**減碼較少**、續抱挑戰更高目標。")
+            if wk_within is not None:
+                msg.append(f"技術面偏多，且 **週線目標 {wk_within:.2f}** 在 +8% 內，傾向**小幅減碼、續抱挑戰週線目標**。")
             else:
                 msg.append("技術面：短線/波段皆偏多，可**續抱**或" + add_phrase() + "。")
         elif short_score < 50 and swing_score < 50:
@@ -800,6 +813,7 @@ def personalized_action(symbol: str,
 
     msg.append(risk_budget_hint(atr_pct))
     return " ".join(msg)
+
 
 
 # =============================
@@ -973,19 +987,32 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.json(wk["components"])
 
 
-        # 個人化持倉建議（已接上目標價條件）
+        # 個人化持倉建議（已接上日線 + 週線目標條件）
         pa = position_analysis(m, avg_cost, lots)
         st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
+
         if pa:
-            st.write(f"- 標的：**{code_display}**")
-            st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
-            st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
-            suggestion = personalized_action(code_display,
-                                            result["short"]["score"], result["swing"]["score"],
-                                            m, pa, atr_pct, targets)
-            st.success(suggestion)
-        else:
-            st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+           st.write(f"- 標的：**{code_display}**")
+           st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
+           st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
+
+        # 先算目標價（若你前面已有，可略過重算）
+        vp_full = volume_profile(tech, lookback=60, bins=24)
+        targets = build_targets(m, tech, poc_today, vp_full)
+        wk = build_targets_weekly(m, tech, poc_today)
+
+        # 核心：把週線目標傳入 personalized_action
+        suggestion = personalized_action(
+           code_display,
+           result["short"]["score"], result["swing"]["score"],
+           m, pa, atr_pct,
+           targets,
+           weekly_targets=wk   # 👈 關鍵差異：加入週線目標
+        )
+       st.success(suggestion)
+       else:
+         st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
