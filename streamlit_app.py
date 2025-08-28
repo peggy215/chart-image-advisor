@@ -544,6 +544,145 @@ def build_targets(m: Metrics,
         "explain": explain
     }
 
+def build_targets_weekly(m: Metrics,
+                         tech: pd.DataFrame,
+                         poc_today: Optional[float]) -> Dict:
+    """
+    以『週線』資料計算中長距離目標：
+      - 週線 volume profile（60/120 週）→ 更容易抓到大型壓力（如 50）
+      - 週線高點（52 週/2 年）
+      - 週線箱體/ATR/斐波延伸
+    """
+    if tech is None or tech.empty:
+        return {"short_targets": [], "swing_targets": [], "mid_targets": [], "explain": [], "components": {}}
+
+    # 轉週線
+    tw = tech.resample("W").agg({
+        "Open": "first",
+        "High": "max",
+        "Low": "min",
+        "Close": "last",
+        "Volume": "sum"
+    }).dropna()
+
+    # 週線技術
+    tw["ATR14"] = calc_atr(tw, 14)
+    # 週線 volume profile（以「週K」計算 60/120 週價值區）
+    def vp_week(dfw, lookback, bins):
+        try:
+            d = dfw.dropna().tail(lookback)
+            if d.empty: return None
+            tp = (d["High"] + d["Low"] + d["Close"]) / 3.0
+            vol = d["Volume"].fillna(0)
+            hist, edges = np.histogram(tp, bins=bins, weights=vol)
+            if hist.sum() <= 0: return None
+            centers = (edges[:-1] + edges[1:]) / 2.0
+            poc_idx = int(np.argmax(hist)); poc = float(centers[poc_idx])
+            total = hist.sum(); target = total * 0.7
+            picked = hist[poc_idx]; left = right = poc_idx
+            while picked < target:
+                lv = hist[left-1] if left-1 >= 0 else -1
+                rv = hist[right+1] if right+1 < len(hist) else -1
+                if rv >= lv and right+1 < len(hist):
+                    right += 1; picked += hist[right]
+                elif left-1 >= 0:
+                    left -= 1; picked += hist[left]
+                else:
+                    break
+            val = float(centers[left]); vah = float(centers[right])
+            return {"POC": poc, "VAL": val, "VAH": vah}
+        except Exception:
+            return None
+
+    vp60w  = vp_week(tw, 60, 24)  or {}
+    vp120w = vp_week(tw, 120, 30) or {}
+
+    # 高點（週線）
+    r52w_high  = float(tw["High"].tail(52).max()) if len(tw) >= 52 else float(tw["High"].max())
+    r104w_high = float(tw["High"].tail(104).max()) if len(tw) >= 104 else r52w_high
+
+    # 箱體、ATR（用週線）
+    def box_week(dfw, lookback=60, base=12):
+        d = dfw.dropna().tail(lookback)
+        if d.empty: return {}
+        prior = d.iloc[:-1]; last = d.iloc[-1]
+        box_high = float(prior["High"].tail(base).max())
+        box_low  = float(prior["Low"].tail(base).min())
+        box_h    = max(box_high - box_low, 0.0)
+        breakout = float(last["Close"]) > box_high * 1.003
+        t1 = box_high + 0.618 * box_h if box_h > 0 else None
+        t2 = box_high + 1.000 * box_h if box_h > 0 else None
+        return {"breakout_line": box_high, "box_range": box_h, "t1_box": t1, "t2_box": t2, "is_breakout": breakout}
+
+    def atr_week(dfw, ref=None, mults=(1,2)):
+        atr_series = dfw["ATR14"].dropna()
+        if atr_series.empty: return {}
+        atr = float(atr_series.iloc[-1])
+        p = float(ref) if ref is not None else float(dfw["Close"].iloc[-1])
+        out = {"atr": atr, "ref": p}
+        for i, mlt in enumerate(mults, start=1):
+            out[f"t{i}_atr"] = p + mlt * atr
+        return out
+
+    def fib_week(dfw, lookback=180):
+        d = dfw.dropna().tail(lookback)
+        if d.empty: return {}
+        low_pos  = int(np.argmin(d["Low"].values))
+        high_pos = int(np.argmax(d["High"].values[low_pos:])) + low_pos
+        low  = float(d["Low"].iloc[low_pos]); high = float(d["High"].iloc[high_pos])
+        rng = max(high - low, 0.0)
+        if rng == 0: return {}
+        return {"t1_fib": low + 1.272 * rng, "t2_fib": low + 1.618 * rng}
+
+    bw  = box_week(tw)
+    aw  = atr_week(tw, ref=bw.get("breakout_line"))
+    fw  = fib_week(tw)
+
+    close = float(tw["Close"].iloc[-1])
+
+    # 週線目標：更長期，直接視為「mid」
+    candidates = []
+    for v in [
+        # 週線價值區
+        vp60w.get("VAH"), vp60w.get("POC"),
+        vp120w.get("VAH"), vp120w.get("POC"),
+        # 週線箱體/ATR/斐波
+        bw.get("t2_box"), aw.get("t2_atr"), fw.get("t2_fib"),
+        # 週線高點
+        r52w_high, r104w_high,
+        # 心理整數（以 5 為級距，抓 3 階）
+        *[np.ceil(close/5.0)*5.0 + i*5.0 for i in range(3)]
+    ]:
+        if v is not None and v > close:
+            candidates.append(float(v))
+
+    # 去重
+    def dedup(xs, tol=0.6):
+        xs = sorted([x for x in xs if np.isfinite(x)])
+        out = []
+        for x in xs:
+            if not out or abs(x - out[-1]) > tol:
+                out.append(x)
+        return out
+
+    mid_targets_w = dedup(candidates, tol=0.8)[:5]
+
+    explain = []
+    if vp60w:  explain.append(f"週線 60 週價值區：POC≈{vp60w.get('POC', float('nan')):.2f}、VAH≈{vp60w.get('VAH', float('nan')):.2f}")
+    if vp120w: explain.append(f"週線 120 週價值區：POC≈{vp120w.get('POC', float('nan')):.2f}、VAH≈{vp120w.get('VAH', float('nan')):.2f}")
+    if bw:
+        if bw.get("is_breakout"):
+            explain.append("週線量度升幅：已突箱頂，T2=箱頂+1.0×箱高")
+        else:
+            explain.append(f"週線量度升幅：箱頂≈{bw.get('breakout_line', float('nan')):.2f}，待突破")
+    if aw: explain.append(f"週線 ATR≈{aw.get('atr', float('nan')):.2f}，位移 T2≈{aw.get('t2_atr', float('nan')):.2f}")
+    if fw: explain.append(f"週線斐波：1.618→{fw.get('t2_fib', float('nan')):.2f}")
+
+    return {
+        "mid_targets_weekly": mid_targets_w,
+        "components": {"vp60w": vp60w, "vp120w": vp120w, "box_w": bw, "atr_w": aw, "fib_w": fw},
+        "explain": explain
+    }
 
 
 
@@ -817,6 +956,15 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.markdown("**中長距離目標（延伸）**：{}".format(
     "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
 ))
+            # 週線（更長期）目標價
+wk = build_targets_weekly(m, tech, poc_today)
+st.markdown("**中長距離目標（週線延伸）**：{}".format(
+    "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
+))
+with st.expander("週線目標計算明細 / 依據"):
+    st.write(wk["explain"])
+    st.json(wk["components"])
+
             with st.expander("目標價計算明細 / 依據"):
                 st.write(targets["explain"])
                 st.json(targets["components"])
