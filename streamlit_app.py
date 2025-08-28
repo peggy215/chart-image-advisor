@@ -996,22 +996,22 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
            st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
            st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
 
-        # 先算目標價（若你前面已有，可略過重算）
-        vp_full = volume_profile(tech, lookback=60, bins=24)
-        targets = build_targets(m, tech, poc_today, vp_full)
-        wk = build_targets_weekly(m, tech, poc_today)
+           # 先算目標價（若你前面已有，可略過重算）
+           vp_full = volume_profile(tech, lookback=60, bins=24)
+           targets = build_targets(m, tech, poc_today, vp_full)
+           wk = build_targets_weekly(m, tech, poc_today)
 
-        # 核心：把週線目標傳入 personalized_action
-        suggestion = personalized_action(
-           code_display,
-           result["short"]["score"], result["swing"]["score"],
-           m, pa, atr_pct,
-           targets,
-           weekly_targets=wk   # 👈 關鍵差異：加入週線目標
-        )
-        st.success(suggestion)
+           # 核心：把週線目標傳入 personalized_action
+           suggestion = personalized_action(
+              code_display,
+              result["short"]["score"], result["swing"]["score"],
+              m, pa, atr_pct,
+              targets,
+              weekly_targets=wk   # 👈 關鍵差異：加入週線目標
+           )
+           st.success(suggestion)
         else:
-         st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+           st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
 
 
 
