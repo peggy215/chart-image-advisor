@@ -984,8 +984,8 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                                             result["short"]["score"], result["swing"]["score"],
                                             m, pa, atr_pct, targets)
             st.success(suggestion)
-            else:
-                st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+        else:
+            st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
 
 
 
