@@ -959,9 +959,9 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
         ))
 
-           with st.expander("目標價計算明細 / 依據（每日線）"):
-               st.write(targets["explain"])
-               st.json(targets["components"])
+        with st.expander("目標價計算明細 / 依據（每日線）"):
+            st.write(targets["explain"])
+            st.json(targets["components"])
 
 # 週線目標價
 wk = build_targets_weekly(m, tech, poc_today)
