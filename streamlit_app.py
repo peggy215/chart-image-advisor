@@ -963,27 +963,27 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(targets["explain"])
             st.json(targets["components"])
 
-# 週線目標價
-wk = build_targets_weekly(m, tech, poc_today)
-st.markdown("**中長距離目標（週線延伸）**：{}".format(
-    "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
-))
-with st.expander("目標價計算明細 / 依據（週線）"):
-    st.write(wk["explain"])
-    st.json(wk["components"])
+        # 週線目標價
+        wk = build_targets_weekly(m, tech, poc_today)
+        st.markdown("**中長距離目標（週線延伸）**：{}".format(
+           "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
+        ))
+        with st.expander("目標價計算明細 / 依據（週線）"):
+            st.write(wk["explain"])
+            st.json(wk["components"])
 
 
-            # 個人化持倉建議（已接上目標價條件）
-            pa = position_analysis(m, avg_cost, lots)
-            st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
-            if pa:
-                st.write(f"- 標的：**{code_display}**")
-                st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
-                st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
-                suggestion = personalized_action(code_display,
-                                                result["short"]["score"], result["swing"]["score"],
-                                                m, pa, atr_pct, targets)
-                st.success(suggestion)
+        # 個人化持倉建議（已接上目標價條件）
+        pa = position_analysis(m, avg_cost, lots)
+        st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
+        if pa:
+            st.write(f"- 標的：**{code_display}**")
+            st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
+            st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
+            suggestion = personalized_action(code_display,
+                                            result["short"]["score"], result["swing"]["score"],
+                                            m, pa, atr_pct, targets)
+            st.success(suggestion)
             else:
                 st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
 
