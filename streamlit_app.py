@@ -9,9 +9,9 @@ import yfinance as yf
 import streamlit as st
 
 
-# ------------------------
+# =============================
 # 資料結構
-# ------------------------
+# =============================
 @dataclass
 class Metrics:
     # 價量
@@ -50,9 +50,9 @@ class Metrics:
     vwap_approx: Optional[float] = None  # (H+L+C)/3
 
 
-# ------------------------
+# =============================
 # 技術指標計算
-# ------------------------
+# =============================
 def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
@@ -171,14 +171,11 @@ def latest_metrics(df: pd.DataFrame) -> Metrics:
     )
 
 
-# ------------------------
-# 當日 POC（分時） & 區間 POC（日線）
-# ------------------------
+# =============================
+# POC：當日（分時）/ 區間（日線）
+# =============================
 def session_poc_from_intraday(symbol: str, bins: int = 40, tz: str = "Asia/Taipei") -> Optional[float]:
-    """
-    以分時資料計算「當日 POC」：
-    對今日每根分時K的典型價(HLC3)做加權直方圖（權重=分時成交量）找最大值。
-    """
+    """以分時資料計算『當日 POC』。"""
     try:
         for interval in ["1m", "5m"]:
             df = yf.download(symbol, period="7d", interval=interval, progress=False)
@@ -208,7 +205,7 @@ def session_poc_from_intraday(symbol: str, bins: int = 40, tz: str = "Asia/Taipe
     return None
 
 def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Optional[Dict[str, float]]:
-    """近 N 日（日線）量價分布：POC / VAL / VAH（70%價值區）。"""
+    """近 N 日（日線）量價分布：POC / VAL / VAH。"""
     try:
         d = df.dropna().tail(lookback)
         if d.empty:
@@ -243,9 +240,9 @@ def volume_profile(df: pd.DataFrame, lookback: int = 60, bins: int = 24) -> Opti
         return None
 
 
-# ------------------------
-# 技術面評分（+ POC）
-# ------------------------
+# =============================
+# 評分（含 POC）
+# =============================
 def analyze(m: Metrics,
             poc_today: Optional[float] = None,
             poc_60: Optional[float] = None) -> Dict:
@@ -254,7 +251,7 @@ def analyze(m: Metrics,
     def lt(a, b): return (a is not None and b is not None and a < b)
 
     short_score, swing_score = 50, 50
-    # 原有短線
+    # 短線
     if gt(m.close, m.MA5): short_score += 8; notes.append("收盤>MA5 (+8)")
     if gt(m.close, m.MA10): short_score += 8; notes.append("收盤>MA10 (+8)")
     if gt(m.MA5, m.MA10): short_score += 6; notes.append("MA5>MA10 (+6)")
@@ -264,14 +261,13 @@ def analyze(m: Metrics,
     if m.DIF is not None and m.MACD is not None and m.DIF > m.MACD: short_score += 6; notes.append("DIF>MACD (+6)")
     if lt(m.close, m.MA20): short_score -= 6; notes.append("收盤<MA20 (-6)")
     if lt(m.volume, m.MV20): short_score -= 4; notes.append("量<MV20 (-4)")
-    # 新增：當日 POC
     if poc_today is not None:
         if m.close is not None and m.close > poc_today:
             short_score += 6; notes.append("收盤>當日POC (+6)")
         elif m.close is not None and m.close < poc_today:
             short_score -= 6; notes.append("收盤<當日POC (-6)")
 
-    # 原有波段
+    # 波段
     if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
     if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
     if gt(m.MA20, m.MA60): swing_score += 10; notes.append("MA20>MA60 (+10)")
@@ -281,7 +277,6 @@ def analyze(m: Metrics,
     if lt(m.close, m.MA60): swing_score -= 8; notes.append("收盤<MA60 (-8)")
     if lt(m.MA20, m.MA60): swing_score -= 8; notes.append("MA20<MA60 (-8)")
     if m.DIF is not None and m.MACD is not None and m.DIF < m.MACD: swing_score -= 6; notes.append("DIF<MACD (-6)")
-    # 新增：60日 POC
     if poc_60 is not None:
         if m.close is not None and m.close > poc_60:
             swing_score += 6; notes.append("收盤>60日POC (+6)")
@@ -301,9 +296,9 @@ def analyze(m: Metrics,
     }
 
 
-# ------------------------
+# =============================
 # 支撐 / 壓力（含 POC）
-# ------------------------
+# =============================
 def recent_levels(df: pd.DataFrame, lookback: int = 20) -> Dict[str, float]:
     d = df.dropna().tail(lookback)
     return {
@@ -323,7 +318,6 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics,
     lv20 = recent_levels(tech, 20)
     lv60 = recent_levels(tech, 60)
 
-    # 把當日 POC 當短線候選、60日 POC 當波段候選
     short_below = [m.MA5, m.MA10, poc_today, lv20.get("recent_low")]
     short_above = [m.MA20, poc_today, lv20.get("recent_high")]
 
@@ -341,9 +335,9 @@ def estimate_levels(tech: pd.DataFrame, m: Metrics,
     }
 
 
-# ------------------------
+# =============================
 # 跳空解讀
-# ------------------------
+# =============================
 def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
     if gap_pct is None:
         return "無法計算跳空。"
@@ -365,9 +359,127 @@ def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
     return f"{s}：{gap_pct:.2f}%（{strength}）{extra}"
 
 
-# ------------------------
-# 個人倉位 / 風控
-# ------------------------
+# =============================
+# 🎯 目標價模組
+# =============================
+def dedup_levels(levels, tol=0.3):
+    xs = sorted([float(x) for x in levels if x is not None and np.isfinite(x)])
+    out = []
+    for x in xs:
+        if not out or abs(x - out[-1]) > tol:
+            out.append(x)
+    return out
+
+def box_breakout_targets(df: pd.DataFrame, lookback: int = 60, base: int = 20) -> Dict:
+    d = df.dropna().tail(lookback)
+    if d.empty:
+        return {}
+    prior = d.iloc[:-1]
+    last = d.iloc[-1]
+
+    box_high = float(prior["High"].tail(base).max())
+    box_low  = float(prior["Low"].tail(base).min())
+    box_h    = max(box_high - box_low, 0.0)
+    breakout = (float(last["Close"]) > box_high * 1.003)
+
+    t1 = box_high + 0.618 * box_h if box_h > 0 else None
+    t2 = box_high + 1.000 * box_h if box_h > 0 else None
+    return {
+        "breakout_line": box_high,
+        "base_low": box_low,
+        "box_range": box_h,
+        "t1_box": t1,
+        "t2_box": t2,
+        "is_breakout": breakout
+    }
+
+def atr_targets(df: pd.DataFrame, ref_price: Optional[float] = None, mults=(1, 2)) -> Dict:
+    if "ATR14" not in df.columns:
+        df["ATR14"] = calc_atr(df, 14)
+    atr_series = df["ATR14"].dropna()
+    if atr_series.empty:
+        return {}
+    atr = float(atr_series.iloc[-1])
+    p = float(ref_price) if ref_price is not None else float(df["Close"].iloc[-1])
+
+    out = {"atr": atr, "ref": p}
+    for i, m in enumerate(mults, start=1):
+        out[f"t{i}_atr"] = p + m * atr
+    return out
+
+def fib_extension_targets(df: pd.DataFrame, lookback: int = 180) -> Dict:
+    d = df.dropna().tail(lookback)
+    if d.empty:
+        return {}
+    low_pos  = int(np.argmin(d["Low"].values))
+    high_pos = int(np.argmax(d["High"].values[low_pos:])) + low_pos
+
+    low  = float(d["Low"].iloc[low_pos])
+    high = float(d["High"].iloc[high_pos])
+    rng  = max(high - low, 0.0)
+    if rng == 0:
+        return {}
+
+    t1 = low + 1.272 * rng
+    t2 = low + 1.618 * rng
+    return {"swing_low": low, "swing_high": high, "t1_fib": t1, "t2_fib": t2}
+
+def build_targets(m: Metrics,
+                  tech: pd.DataFrame,
+                  poc_today: Optional[float],
+                  vp60: Optional[Dict[str, float]]) -> Dict:
+    close = m.close if m.close is not None else float(tech["Close"].iloc[-1])
+
+    box = box_breakout_targets(tech)
+    atr = atr_targets(tech, ref_price=box.get("breakout_line") or close)
+    fib = fib_extension_targets(tech)
+
+    va_poc = vp60 or {}
+    vp_poc = va_poc.get("POC")
+    vp_val = va_poc.get("VAL")
+    vp_vah = va_poc.get("VAH")
+
+    short_candidates = []
+    for v in [m.MA20, m.MA60, poc_today, vp_poc, vp_val, vp_vah, box.get("t1_box")]:
+        if v is not None and v > close:
+            short_candidates.append(float(v))
+    short_targets = dedup_levels(short_candidates, tol=0.3)[:2]
+
+    swing_candidates = []
+    for v in [box.get("t2_box"),
+              fib.get("t1_fib"), fib.get("t2_fib"),
+              atr.get("t1_atr"), atr.get("t2_atr"),
+              vp_vah, vp_poc]:
+        if v is not None and v > close:
+            swing_candidates.append(float(v))
+    swing_targets = dedup_levels(swing_candidates, tol=0.5)[:3]
+
+    explain = []
+    if box:
+        if box.get("is_breakout"):
+            explain.append("量度升幅：已突破箱頂，T1=箱頂+0.618×箱高、T2=箱頂+1.0×箱高")
+        else:
+            explain.append(f"量度升幅：箱頂在 {box.get('breakout_line', float('nan')):.2f}，待突破再看 T1/T2")
+    if atr:
+        t1a = atr.get('t1_atr'); t2a = atr.get('t2_atr')
+        explain.append(f"ATR(14)≈{atr['atr']:.2f}，位移目標：{('-' if t1a is None else f'{t1a:.2f}')} / {('-' if t2a is None else f'{t2a:.2f}')}")
+    if fib:
+        t1f = fib.get('t1_fib'); t2f = fib.get('t2_fib')
+        explain.append(f"斐波延伸：1.272→{('-' if t1f is None else f'{t1f:.2f}')}、1.618→{('-' if t2f is None else f'{t2f:.2f}')}")
+    if vp60:
+        explain.append(f"價值區：POC≈{vp_poc:.2f}、VAH≈{vp_vah:.2f}")
+
+    return {
+        "short_targets": short_targets,
+        "swing_targets": swing_targets,
+        "components": {"box": box, "atr": atr, "fib": fib, "vp60": va_poc},
+        "explain": explain
+    }
+
+
+# =============================
+# 風控 / 個人化動作（已接上目標價）
+# =============================
 def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
     if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
         return {}
@@ -388,12 +500,24 @@ def risk_budget_hint(atr_pct: Optional[float]) -> str:
         return "風控：波動中等（ATR≈{:.1f}%），建議單筆風險 **1.0%–1.5%**".format(atr_pct)
     return "風控：波動低（ATR≈{:.1f}%），建議單筆風險 **1.5%–2.0%**".format(atr_pct)
 
+def pct_diff(a: float, b: float) -> float:
+    if a is None or b is None or b == 0: return np.inf
+    return (a / b - 1.0) * 100.0
+
 def personalized_action(symbol: str,
                         short_score: int, swing_score: int,
                         m: Metrics, pa: Dict[str, float],
-                        atr_pct: Optional[float]) -> str:
+                        atr_pct: Optional[float],
+                        targets: Dict) -> str:
+    """
+    將『目標價』納入動作條件：
+    - 逼近短線目標（<=1%）或到達 → 建議減碼（依張數）
+    - 逼近波段目標（<=1.5%） → 建議更積極落袋
+    - 尚未接近 → 提醒以支撐/趨勢加碼或續抱
+    """
     lots = pa.get("lots", 0) if pa else 0
     header = f"標的— "
+    close = m.close
 
     if not pa:
         return header + "未輸入成本/庫存：先依技術面執行。 " + risk_budget_hint(atr_pct)
@@ -401,56 +525,73 @@ def personalized_action(symbol: str,
     ret = pa["ret_pct"]
     msg = [header]
 
-    def sell_phrase():
-        if lots >= 3:
-            return "逢壓力**分批減碼 20%–30%**"
-        if lots >= 2:
-            return "逢壓力**先賣 1 張**，其餘續抱"
-        return "逢壓力**可考慮全數賣出**或視情況續抱"
+    # 目標價距離判斷
+    s_targets = targets.get("short_targets") or []
+    w_targets = targets.get("swing_targets") or []
+    near_short = None
+    for t in s_targets:
+        if abs(pct_diff(close, t)) <= 1.0:  # 1% 內視為逼近
+            near_short = t; break
+    near_swing = None
+    for t in w_targets:
+        if abs(pct_diff(close, t)) <= 1.5:  # 波段給多一點容忍
+            near_swing = t; break
 
-    def buy_phrase():
+    # 張數對應的動作模板
+    def reduce_phrase(weight="20%"):
         if lots >= 3:
-            return "**逢回測支撐不破小幅加碼（不追高）**"
+            return f"**分批減碼 {weight}**"
+        if lots >= 2:
+            return "**先賣 1 張**"
+        return "**可考慮出清**或視情況續抱"
+
+    def add_phrase():
+        if lots >= 3:
+            return "**回測支撐不破小幅加碼（不追高）**"
         if lots == 2:
             return "**回測支撐不破可小量加碼**"
-        return "**先觀察支撐，必要時再加碼**（單筆勿過重）"
+        return "**先觀察支撐，必要時再加碼**"
 
+    # 先以損益分層描述
     if ret >= 15:
-        msg.append(f"目前獲利約 {ret:.1f}%，{sell_phrase()}。")
+        msg.append(f"目前獲利約 {ret:.1f}%，遇壓力位建議 {reduce_phrase('20%–30%')}。")
     elif ret >= 8:
-        msg.append(f"目前獲利約 {ret:.1f}%，{sell_phrase()}，其餘續抱看趨勢。")
+        msg.append(f"目前獲利約 {ret:.1f}%，逢壓力 {reduce_phrase()}，其餘續抱看趨勢。")
     elif ret > 0:
-        msg.append(f"小幅獲利 {ret:.1f}%，優先**守 MA5/MA10**；跌破則降風險。")
+        msg.append(f"小幅獲利 {ret:.1f}%，優先守 **MA5/MA10**；跌破則降風險。")
     elif ret <= -10:
-        if lots >= 2:
-            msg.append(f"虧損 {ret:.1f}%，**嚴設停損**或反彈**大幅減碼（至少 1 張）**。")
-        else:
-            msg.append(f"虧損 {ret:.1f}%，**嚴設停損**或反彈**出清**。")
+        if lots >= 2: msg.append(f"虧損 {ret:.1f}%，**嚴設停損**或反彈**大幅減碼（至少 1 張）**。")
+        else:         msg.append(f"虧損 {ret:.1f}%，**嚴設停損**或反彈**出清**。")
     elif ret <= -5:
-        if lots >= 2:
-            msg.append(f"虧損 {ret:.1f}%，**反彈先減 1 張**，避免擴大。")
-        else:
-            msg.append(f"虧損 {ret:.1f}%，**反彈減碼或出清**，避免擴大。")
+        if lots >= 2: msg.append(f"虧損 {ret:.1f}%，**反彈先減 1 張**，避免擴大。")
+        else:         msg.append(f"虧損 {ret:.1f}%，**反彈減碼或出清**，避免擴大。")
     else:
-        msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{buy_phrase()}。")
+        msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{add_phrase()}。")
 
-    if short_score >= 65 and swing_score >= 65:
-        msg.append("技術面：短線/波段皆偏多，可**續抱**或" + buy_phrase() + "。")
-    elif short_score < 50 and swing_score < 50:
-        msg.append("技術面：短線/波段皆偏弱，建議**逢反彈減碼**或換股。")
+    # 把目標價條件接上：逼近短線/波段目標
+    if near_short is not None:
+        msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，建議 {reduce_phrase()}，並將停利拉高至 **前一日低點/MA5**。")
+    elif near_swing is not None:
+        msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，建議 {reduce_phrase('30%–50%')}，其餘視量能續抱。")
     else:
-        msg.append("技術面：訊號分歧，採**分批操作**並嚴守支撐/停損。")
+        # 尚未接近任何目標 → 依技術面
+        if short_score >= 65 and swing_score >= 65:
+            msg.append("技術面：短線/波段皆偏多，可**續抱**或" + add_phrase() + "。")
+        elif short_score < 50 and swing_score < 50:
+            msg.append("技術面：短線/波段皆偏弱，建議**逢反彈減碼**或換股。")
+        else:
+            msg.append("技術面：訊號分歧，採**分批操作**並嚴守支撐/停損。")
 
     msg.append(risk_budget_hint(atr_pct))
     return " ".join(msg)
 
 
-# ------------------------
+# =============================
 # UI
-# ------------------------
-st.set_page_config(page_title="Chart Advisor — 台股代碼直抓（含POC評分）", layout="centered")
-st.title("📈 Chart Advisor — 台股代碼直抓（含 POC 納入評分/支撐）")
-st.caption("輸入台股代碼（如 2330），自動抓 Yahoo 數據；內建當日/60日 POC、VWAP（近似）、跳空解讀、支撐/壓力與個人化建議。")
+# =============================
+st.set_page_config(page_title="Chart Advisor — 台股（含 POC / 目標價動作）", layout="centered")
+st.title("📈 Chart Advisor — 台股（含 POC、支撐壓力、目標價與個人化建議）")
+st.caption("輸入台股代碼（如 2330），自動抓 Yahoo 數據；整合當日/60日 POC、支撐/壓力、VWAP（近似）、跳空解讀、🎯目標價與個人化倉位建議。")
 
 symbol = st.text_input("台股代碼 / Yahoo 代碼", value="2330", help="台股四位數代碼，例如 2330；或輸入完整 Yahoo 代碼，如 2330.TW")
 period = st.selectbox("抓取區間", ["6mo", "1y", "2y"], index=0, help="用來計算均線/指標的歷史天數")
@@ -540,6 +681,8 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             vp = volume_profile(tech, lookback=60, bins=24)
             if vp and "POC" in vp:
                 poc_60 = vp["POC"]
+        else:
+            vp = None
 
         # 分數（含 POC）
         result = analyze(m, poc_today=poc_today, poc_60=poc_60)
@@ -564,7 +707,7 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
         st.info(interpret_gap(m.gap_pct, m.vol_r5))
 
-        # 支撐 / 壓力（把 POC 納入候選）
+        # 支撐 / 壓力
         atr_pct = None
         if tech is not None and "ATR14_pct" in tech.columns:
             try:
@@ -583,36 +726,36 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                 st.markdown("**短線壓力**： " + (", ".join([f"{x:.2f}" for x in lv["short_resistances"]]) if lv["short_resistances"] else "-"))
                 st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
 
-            st.subheader("🧭 RSI / 布林通道 / 波動度")
-            colX, colY, colZ = st.columns(3)
-            with colX:
-                st.markdown(f"**RSI(14)**：{('-' if m.RSI14 is None else f'{m.RSI14:.2f}')}")
-            with colY:
-                if None in (m.close, m.BB_UP, m.BB_LOW, m.BB_MID):
-                    st.markdown("**布林帶**：—")
-                else:
-                    if m.close > m.BB_UP:
-                        st.markdown("**布林帶**：收在上軌外（強勢）")
-                    elif m.close < m.BB_LOW:
-                        st.markdown("**布林帶**：收在下軌外（超跌）")
-                    else:
-                        st.markdown("**布林帶**：軌道內整理")
-            with colZ:
-                st.markdown(f"**ATR(14)%**：{('-' if atr_pct is None else f'{atr_pct:.2f}%')}")
+            # 🎯 目標價
+            st.subheader("🎯 目標價（自動）")
+            vp_full = volume_profile(tech, lookback=60, bins=24)
+            targets = build_targets(m, tech, poc_today, vp_full)
 
-        # 個人化持倉建議
-        pa = position_analysis(m, avg_cost, lots)
-        st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
-        if pa:
-            st.write(f"- 標的：**{code_display}**")
-            st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
-            st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
-            suggestion = personalized_action(code_display,
-                                            result["short"]["score"], result["swing"]["score"],
-                                            m, pa, atr_pct)
-            st.success(suggestion)
-        else:
-            st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+            st.markdown("**短線目標**（近）：{}".format(
+                "-" if not targets["short_targets"] else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
+            ))
+            st.markdown("**波段目標**（遠）：{}".format(
+                "-" if not targets["swing_targets"] else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
+            ))
+
+            with st.expander("目標價計算明細 / 依據"):
+                st.write(targets["explain"])
+                st.json(targets["components"])
+
+            # 個人化持倉建議（已接上目標價條件）
+            pa = position_analysis(m, avg_cost, lots)
+            st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
+            if pa:
+                st.write(f"- 標的：**{code_display}**")
+                st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
+                st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
+                suggestion = personalized_action(code_display,
+                                                result["short"]["score"], result["swing"]["score"],
+                                                m, pa, atr_pct, targets)
+                st.success(suggestion)
+            else:
+                st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
