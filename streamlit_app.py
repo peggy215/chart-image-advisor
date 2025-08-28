@@ -428,31 +428,70 @@ def build_targets(m: Metrics,
                   tech: pd.DataFrame,
                   poc_today: Optional[float],
                   vp60: Optional[Dict[str, float]]) -> Dict:
+    """
+    回傳三層目標：
+      - short_targets：近距離（短線）目標
+      - swing_targets：中距離（波段）目標
+      - mid_targets  ：較長距離（中長）目標，會包含 60/120 日高點、120 日價值區、整數關卡等
+    """
+    def dedup(xs, tol):
+        xs = sorted([float(x) for x in xs if x is not None and np.isfinite(x)])
+        out = []
+        for x in xs:
+            if not out or abs(x - out[-1]) > tol:
+                out.append(x)
+        return out
+
     close = m.close if m.close is not None else float(tech["Close"].iloc[-1])
 
+    # ----- 量度升幅、ATR、斐波延伸（沿用原本邏輯）
     box = box_breakout_targets(tech)
     atr = atr_targets(tech, ref_price=box.get("breakout_line") or close)
     fib = fib_extension_targets(tech)
 
-    va_poc = vp60 or {}
-    vp_poc = va_poc.get("POC")
-    vp_val = va_poc.get("VAL")
-    vp_vah = va_poc.get("VAH")
+    # ----- 60 日價值區（沿用原本 vp60）
+    vp60 = vp60 or {}
+    vp60_poc = vp60.get("POC"); vp60_val = vp60.get("VAL"); vp60_vah = vp60.get("VAH")
 
+    # ----- 120 日價值區 & 高低點（新增）
+    vp120 = volume_profile(tech, lookback=120, bins=30) or {}
+    vp120_poc = vp120.get("POC"); vp120_vah = vp120.get("VAH")
+    recent60_high = float(tech["High"].tail(60).max())
+    recent120_high = float(tech["High"].tail(120).max())
+
+    # ----- 心理整數關卡（以 5 元為步伐，抓「下一個整數」與「再下一個」）
+    def next_rounds(px: float, step: float = 5.0, n: int = 2):
+        base = np.ceil(px / step) * step
+        return [base + i * step for i in range(n)]
+    round_candidates = next_rounds(close, step=5, n=2)
+
+    # ----- 短線目標：靠近現價的上方價位
     short_candidates = []
-    for v in [m.MA20, m.MA60, poc_today, vp_poc, vp_val, vp_vah, box.get("t1_box")]:
+    for v in [m.MA20, m.MA60, poc_today, vp60_poc, vp60_val, vp60_vah, box.get("t1_box")]:
         if v is not None and v > close:
             short_candidates.append(float(v))
-    short_targets = dedup_levels(short_candidates, tol=0.3)[:2]
+    short_targets = dedup(short_candidates, tol=0.3)[:2]
 
+    # ----- 波段目標：中距離（原本）
     swing_candidates = []
     for v in [box.get("t2_box"),
               fib.get("t1_fib"), fib.get("t2_fib"),
               atr.get("t1_atr"), atr.get("t2_atr"),
-              vp_vah, vp_poc]:
+              vp60_vah, vp60_poc]:
         if v is not None and v > close:
             swing_candidates.append(float(v))
-    swing_targets = dedup_levels(swing_candidates, tol=0.5)[:3]
+    swing_targets = dedup(swing_candidates, tol=0.5)[:3]
+
+    # ----- 中長距離目標（新增）：
+    #     60/120 日高點、120 日價值區（POC/VAH）、下一個/再下一個整數關卡
+    mid_candidates = []
+    for v in [recent60_high, recent120_high, vp120_vah, vp120_poc] + round_candidates:
+        if v is not None and v > close:
+            mid_candidates.append(float(v))
+    # 避免和 swing_targets 重疊太近
+    mid_targets = dedup(mid_candidates + swing_targets, tol=0.6)
+    # 只保留「比 swing 更遠一點」的 2~3 個
+    mid_targets = [x for x in mid_targets if all(abs(x - s) > 0.6 for s in swing_targets)][:3]
 
     explain = []
     if box:
@@ -461,20 +500,30 @@ def build_targets(m: Metrics,
         else:
             explain.append(f"量度升幅：箱頂在 {box.get('breakout_line', float('nan')):.2f}，待突破再看 T1/T2")
     if atr:
-        t1a = atr.get('t1_atr'); t2a = atr.get('t2_atr')
+        t1a, t2a = atr.get("t1_atr"), atr.get("t2_atr")
         explain.append(f"ATR(14)≈{atr['atr']:.2f}，位移目標：{('-' if t1a is None else f'{t1a:.2f}')} / {('-' if t2a is None else f'{t2a:.2f}')}")
     if fib:
-        t1f = fib.get('t1_fib'); t2f = fib.get('t2_fib')
+        t1f, t2f = fib.get("t1_fib"), fib.get("t2_fib")
         explain.append(f"斐波延伸：1.272→{('-' if t1f is None else f'{t1f:.2f}')}、1.618→{('-' if t2f is None else f'{t2f:.2f}')}")
     if vp60:
-        explain.append(f"價值區：POC≈{vp_poc:.2f}、VAH≈{vp_vah:.2f}")
+        explain.append(f"60日價值區：POC≈{vp60_poc:.2f}、VAH≈{vp60_vah:.2f}")
+    if vp120:
+        explain.append(f"120日價值區：POC≈{(vp120_poc or float('nan')):.2f}、VAH≈{(vp120_vah or float('nan')):.2f}")
+    explain.append(f"心理整數關卡（上方）：{', '.join([f'{r:.2f}' for r in round_candidates])}")
 
     return {
         "short_targets": short_targets,
         "swing_targets": swing_targets,
-        "components": {"box": box, "atr": atr, "fib": fib, "vp60": va_poc},
+        "mid_targets": mid_targets,
+        "components": {
+            "box": box, "atr": atr, "fib": fib,
+            "vp60": vp60, "vp120": vp120,
+            "recent60_high": recent60_high, "recent120_high": recent120_high,
+            "rounds": round_candidates
+        },
         "explain": explain
     }
+
 
 
 # =============================
@@ -510,11 +559,15 @@ def personalized_action(symbol: str,
                         atr_pct: Optional[float],
                         targets: Dict) -> str:
     """
-    將『目標價』納入動作條件：
-    - 逼近短線目標（<=1%）或到達 → 建議減碼（依張數）
-    - 逼近波段目標（<=1.5%） → 建議更積極落袋
-    - 尚未接近 → 提醒以支撐/趨勢加碼或續抱
+    納入 mid_targets：
+      - 逼近短線目標（±1%） → 依張數減碼
+      - 逼近波段目標（±1.5%） → 減碼 30–50%
+      - 若技術分數強，且『距離 mid_targets <= 8%』 → 建議僅小幅減碼，嘗試守到 mid（例如 50）
     """
+    def pct_diff(a: float, b: float) -> float:
+        if a is None or b is None or b == 0: return np.inf
+        return (a / b - 1.0) * 100.0
+
     lots = pa.get("lots", 0) if pa else 0
     header = f"標的— "
     close = m.close
@@ -528,31 +581,25 @@ def personalized_action(symbol: str,
     # 目標價距離判斷
     s_targets = targets.get("short_targets") or []
     w_targets = targets.get("swing_targets") or []
-    near_short = None
-    for t in s_targets:
-        if abs(pct_diff(close, t)) <= 1.0:  # 1% 內視為逼近
-            near_short = t; break
-    near_swing = None
-    for t in w_targets:
-        if abs(pct_diff(close, t)) <= 1.5:  # 波段給多一點容忍
-            near_swing = t; break
+    mid_targets = targets.get("mid_targets") or []
 
-    # 張數對應的動作模板
+    near_short = next((t for t in s_targets if abs(pct_diff(close, t)) <= 1.0), None)
+    near_swing = next((t for t in w_targets if abs(pct_diff(close, t)) <= 1.5), None)
+    # 「可望守到 mid」條件：強勢分數 + 最近一個 mid 價落在 +8% 以內
+    mid_within = next((t for t in mid_targets if 0 < pct_diff(t, close) <= 8.0), None)
+
+    # 張數對應句型
     def reduce_phrase(weight="20%"):
-        if lots >= 3:
-            return f"**分批減碼 {weight}**"
-        if lots >= 2:
-            return "**先賣 1 張**"
+        if lots >= 3: return f"**分批減碼 {weight}**"
+        if lots >= 2: return "**先賣 1 張**"
         return "**可考慮出清**或視情況續抱"
 
     def add_phrase():
-        if lots >= 3:
-            return "**回測支撐不破小幅加碼（不追高）**"
-        if lots == 2:
-            return "**回測支撐不破可小量加碼**"
+        if lots >= 3: return "**回測支撐不破小幅加碼（不追高）**"
+        if lots == 2: return "**回測支撐不破可小量加碼**"
         return "**先觀察支撐，必要時再加碼**"
 
-    # 先以損益分層描述
+    # 淨損益敘述
     if ret >= 15:
         msg.append(f"目前獲利約 {ret:.1f}%，遇壓力位建議 {reduce_phrase('20%–30%')}。")
     elif ret >= 8:
@@ -568,15 +615,24 @@ def personalized_action(symbol: str,
     else:
         msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{add_phrase()}。")
 
-    # 把目標價條件接上：逼近短線/波段目標
+    # 目標價條件
     if near_short is not None:
-        msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，建議 {reduce_phrase()}，並將停利拉高至 **前一日低點/MA5**。")
+        # 若還有 mid 近在咫尺且分數偏多 → 先小減，嘗試守到 mid（例如 50）
+        if mid_within is not None and short_score >= 65 and swing_score >= 65:
+            msg.append(f"已逼近短線目標 {near_short:.2f}（±1%），但 **中長距離目標 {mid_within:.2f} 僅距 +8% 內**，建議**小幅減碼**後續抱觀察量能，嘗試守到中長目標。")
+        else:
+            msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，建議 {reduce_phrase()}，停利拉高至 **前一日低點/MA5**。")
     elif near_swing is not None:
-        msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，建議 {reduce_phrase('30%–50%')}，其餘視量能續抱。")
+        if mid_within is not None and swing_score >= 65:
+            msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，可先 {reduce_phrase('20%–30%')}，若量價健康且**中長目標 {mid_within:.2f}** 仍近，可續抱挑戰。")
+        else:
+            msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，建議 {reduce_phrase('30%–50%')}，其餘視量能續抱。")
     else:
-        # 尚未接近任何目標 → 依技術面
         if short_score >= 65 and swing_score >= 65:
-            msg.append("技術面：短線/波段皆偏多，可**續抱**或" + add_phrase() + "。")
+            if mid_within is not None:
+                msg.append(f"技術面偏多，且 **中長距離目標 {mid_within:.2f}** 在 +8% 內，可**減碼較少**、續抱挑戰更高目標。")
+            else:
+                msg.append("技術面：短線/波段皆偏多，可**續抱**或" + add_phrase() + "。")
         elif short_score < 50 and swing_score < 50:
             msg.append("技術面：短線/波段皆偏弱，建議**逢反彈減碼**或換股。")
         else:
@@ -737,7 +793,9 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.markdown("**波段目標**（遠）：{}".format(
                 "-" if not targets["swing_targets"] else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
             ))
-
+            st.markdown("**中長距離目標（延伸）**：{}".format(
+    "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
+))
             with st.expander("目標價計算明細 / 依據"):
                 st.write(targets["explain"])
                 st.json(targets["components"])
