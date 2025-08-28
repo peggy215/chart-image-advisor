@@ -432,7 +432,7 @@ def build_targets(m: Metrics,
     回傳三層目標：
       - short_targets：近距離（短線）目標
       - swing_targets：中距離（波段）目標
-      - mid_targets  ：較長距離（中長）目標，會包含 60/120 日高點、120 日價值區、整數關卡等
+      - mid_targets  ：較長距離（中長）目標，擴大時間窗（含 52週/2年高點、120/250日價值區、整數關卡、可選強制價位）
     """
     def dedup(xs, tol):
         xs = sorted([float(x) for x in xs if x is not None and np.isfinite(x)])
@@ -442,37 +442,50 @@ def build_targets(m: Metrics,
                 out.append(x)
         return out
 
+    def next_rounds(px: float, step: float = 5.0, n: int = 3):
+        base = np.ceil(px / step) * step
+        return [base + i * step for i in range(n)]
+
     close = m.close if m.close is not None else float(tech["Close"].iloc[-1])
 
-    # ----- 量度升幅、ATR、斐波延伸（沿用原本邏輯）
+    # ----- 量度升幅、ATR、斐波延伸（沿用）
     box = box_breakout_targets(tech)
     atr = atr_targets(tech, ref_price=box.get("breakout_line") or close)
     fib = fib_extension_targets(tech)
 
-    # ----- 60 日價值區（沿用原本 vp60）
+    # ----- 60 日價值區（沿用呼入參數 vp60）
     vp60 = vp60 or {}
     vp60_poc = vp60.get("POC"); vp60_val = vp60.get("VAL"); vp60_vah = vp60.get("VAH")
 
-    # ----- 120 日價值區 & 高低點（新增）
+    # ----- 更長時間窗的價值區（新增 120 / 250 日）
     vp120 = volume_profile(tech, lookback=120, bins=30) or {}
+    vp250 = volume_profile(tech, lookback=250, bins=36) or {}
     vp120_poc = vp120.get("POC"); vp120_vah = vp120.get("VAH")
-    recent60_high = float(tech["High"].tail(60).max())
+    vp250_poc = vp250.get("POC"); vp250_vah = vp250.get("VAH")
+
+    # ----- 高點：60 / 120 / 252（52週）/ 500（日約2年）
+    recent60_high  = float(tech["High"].tail(60).max())
     recent120_high = float(tech["High"].tail(120).max())
+    recent252_high = float(tech["High"].tail(252).max()) if len(tech) >= 60 else recent120_high
+    recent500_high = float(tech["High"].tail(500).max()) if len(tech) >= 120 else recent252_high
 
-    # ----- 心理整數關卡（以 5 元為步伐，抓「下一個整數」與「再下一個」）
-    def next_rounds(px: float, step: float = 5.0, n: int = 2):
-        base = np.ceil(px / step) * step
-        return [base + i * step for i in range(n)]
-    round_candidates = next_rounds(close, step=5, n=2)
+    # ----- 心理整數關卡：抓 3 階
+    round_candidates = next_rounds(close, step=5, n=3)
 
-    # ----- 短線目標：靠近現價的上方價位
+    # ----- 可選：強制納入特定長期關鍵價（例如 50），限距離 +30% 內
+    force_levels = []
+    for hard in [50.0]:
+        if hard > close and (hard / close - 1.0) * 100.0 <= 30.0:
+            force_levels.append(hard)
+
+    # ---- 短線目標（近）
     short_candidates = []
     for v in [m.MA20, m.MA60, poc_today, vp60_poc, vp60_val, vp60_vah, box.get("t1_box")]:
         if v is not None and v > close:
             short_candidates.append(float(v))
     short_targets = dedup(short_candidates, tol=0.3)[:2]
 
-    # ----- 波段目標：中距離（原本）
+    # ---- 波段目標（中）
     swing_candidates = []
     for v in [box.get("t2_box"),
               fib.get("t1_fib"), fib.get("t2_fib"),
@@ -482,17 +495,18 @@ def build_targets(m: Metrics,
             swing_candidates.append(float(v))
     swing_targets = dedup(swing_candidates, tol=0.5)[:3]
 
-    # ----- 中長距離目標（新增）：
-    #     60/120 日高點、120 日價值區（POC/VAH）、下一個/再下一個整數關卡
+    # ---- 中長距離目標（遠）：擴大時間窗 + 更大價值區 + 整數關卡 + 強制價位
     mid_candidates = []
-    for v in [recent60_high, recent120_high, vp120_vah, vp120_poc] + round_candidates:
+    for v in [recent60_high, recent120_high, recent252_high, recent500_high,
+              vp120_vah, vp120_poc, vp250_vah, vp250_poc] + round_candidates + force_levels:
         if v is not None and v > close:
             mid_candidates.append(float(v))
-    # 避免和 swing_targets 重疊太近
-    mid_targets = dedup(mid_candidates + swing_targets, tol=0.6)
-    # 只保留「比 swing 更遠一點」的 2~3 個
-    mid_targets = [x for x in mid_targets if all(abs(x - s) > 0.6 for s in swing_targets)][:3]
 
+    # 避免與 swing 過度重疊；顯示最多 5 個，較不會被近端目標擠掉
+    mid_targets = dedup(mid_candidates + swing_targets, tol=0.6)
+    mid_targets = [x for x in mid_targets if all(abs(x - s) > 0.6 for s in swing_targets)][:5]
+
+    # ---- 說明
     explain = []
     if box:
         if box.get("is_breakout"):
@@ -506,10 +520,15 @@ def build_targets(m: Metrics,
         t1f, t2f = fib.get("t1_fib"), fib.get("t2_fib")
         explain.append(f"斐波延伸：1.272→{('-' if t1f is None else f'{t1f:.2f}')}、1.618→{('-' if t2f is None else f'{t2f:.2f}')}")
     if vp60:
-        explain.append(f"60日價值區：POC≈{vp60_poc:.2f}、VAH≈{vp60_vah:.2f}")
+        explain.append(f"60日價值區：POC≈{(vp60_poc or float('nan')):.2f}、VAH≈{(vp60_vah or float('nan')):.2f}")
     if vp120:
         explain.append(f"120日價值區：POC≈{(vp120_poc or float('nan')):.2f}、VAH≈{(vp120_vah or float('nan')):.2f}")
-    explain.append(f"心理整數關卡（上方）：{', '.join([f'{r:.2f}' for r in round_candidates])}")
+    if vp250:
+        explain.append(f"250日價值區：POC≈{(vp250_poc or float('nan')):.2f}、VAH≈{(vp250_vah or float('nan')):.2f}")
+    explain.append(f"高點參考：60/120/52週/2年 → {recent60_high:.2f}/{recent120_high:.2f}/{recent252_high:.2f}/{recent500_high:.2f}")
+    explain.append("心理整數關卡（上方三階）：{}".format(", ".join([f"{r:.2f}" for r in round_candidates])))
+    if force_levels:
+        explain.append("強制關鍵價（距離 +30% 內）：{}".format(", ".join([f"{x:.2f}" for x in force_levels])))
 
     return {
         "short_targets": short_targets,
@@ -517,12 +536,14 @@ def build_targets(m: Metrics,
         "mid_targets": mid_targets,
         "components": {
             "box": box, "atr": atr, "fib": fib,
-            "vp60": vp60, "vp120": vp120,
+            "vp60": vp60, "vp120": vp120, "vp250": vp250,
             "recent60_high": recent60_high, "recent120_high": recent120_high,
-            "rounds": round_candidates
+            "recent252_high": recent252_high, "recent500_high": recent500_high,
+            "rounds": round_candidates, "force_levels": force_levels
         },
         "explain": explain
     }
+
 
 
 
