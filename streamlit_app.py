@@ -942,32 +942,36 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
                 st.markdown("**短線壓力**： " + (", ".join([f"{x:.2f}" for x in lv["short_resistances"]]) if lv["short_resistances"] else "-"))
                 st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
 
-            # 🎯 目標價
-            st.subheader("🎯 目標價（自動）")
-            vp_full = volume_profile(tech, lookback=60, bins=24)
-            targets = build_targets(m, tech, poc_today, vp_full)
+           # 🎯 目標價（自動）
+st.subheader("🎯 目標價（自動）")
 
-            st.markdown("**短線目標**（近）：{}".format(
-                "-" if not targets["short_targets"] else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
-            ))
-            st.markdown("**波段目標**（遠）：{}".format(
-                "-" if not targets["swing_targets"] else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
-            ))
-            st.markdown("**中長距離目標（延伸）**：{}".format(
+# 日線目標價
+vp_full = volume_profile(tech, lookback=60, bins=24)
+targets = build_targets(m, tech, poc_today, vp_full)
+
+st.markdown("**短線目標**（近）：{}".format(
+    "-" if not targets["short_targets"] else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
+))
+st.markdown("**波段目標**（中）：{}".format(
+    "-" if not targets["swing_targets"] else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
+))
+st.markdown("**中長距離目標（日線延伸）**：{}".format(
     "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
 ))
-            # 週線（更長期）目標價
+
+with st.expander("目標價計算明細 / 依據（每日線）"):
+    st.write(targets["explain"])
+    st.json(targets["components"])
+
+# 週線目標價
 wk = build_targets_weekly(m, tech, poc_today)
 st.markdown("**中長距離目標（週線延伸）**：{}".format(
     "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
 ))
-with st.expander("週線目標計算明細 / 依據"):
+with st.expander("目標價計算明細 / 依據（週線）"):
     st.write(wk["explain"])
     st.json(wk["components"])
 
-            with st.expander("目標價計算明細 / 依據"):
-                st.write(targets["explain"])
-                st.json(targets["components"])
 
             # 個人化持倉建議（已接上目標價條件）
             pa = position_analysis(m, avg_cost, lots)
