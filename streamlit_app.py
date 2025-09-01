@@ -1041,11 +1041,11 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
              st.metric("波段分數", result["swing"]["score"])
              st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
 
-       # 顯示形態與影響說明
-       st.caption(f"🕯️ 最近形態：{', '.join(patt.get('last', [])) or '-'}")
-       st.caption(candle_note)
+        # 顯示形態與影響說明
+        st.caption(f"🕯️ 最近形態：{', '.join(patt.get('last', [])) or '-'}")
+        st.caption(candle_note)
 
-       with st.expander("判斷依據 / 輸入數據"):
+        with st.expander("判斷依據 / 輸入數據"):
             st.write(result["notes"])
             st.json(result["inputs"])
 
