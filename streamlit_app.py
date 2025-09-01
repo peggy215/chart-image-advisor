@@ -844,6 +844,15 @@ def personalized_action(symbol: str,
                         atr_pct: Optional[float],
                         targets: Dict,
                         weekly_targets: Optional[Dict] = None) -> str:
+    msg.append(risk_budget_hint(atr_pct))
+
+    # === 加上固定解釋說明 ===
+    msg.append("📘 說明：")
+    msg.append("・**停利拉高**：若股價上漲，建議將停利線上移，例如以『前一日低點』或『MA5』作為防守位，確保已獲利不被回吐。")
+    msg.append("・**風控比例**：ATR 反映波動度，例如 ATR≈2.9% 屬於中等波動，建議單筆交易風險控制在總資金的 **1%–1.5%**。")
+
+    return " ".join(msg)
+
     """
     已整合『週線目標在 +8% 內 → 減碼少一點、續抱挑戰週線目標』：
       - 逼近短線目標（±1%） → 依張數減碼
