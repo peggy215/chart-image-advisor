@@ -21,36 +21,6 @@ CANDLE_TRANSLATE = {
     "Bear_Marubozu": ("大陰棒", "實體很長幾乎沒影線，代表賣方強勢")
 }
 
-# --- fix NameError: build_targets not defined ---
-try:
-    build_targets  # noqa: F821  # check if name already exists
-except NameError:
-    try:
-        from targets import build_targets  # ← 改成實際模組路徑
-    except ModuleNotFoundError:
-        try:
-            from utils import build_targets
-        except ModuleNotFoundError:
-            try:
-                from helpers.targets import build_targets
-            except ModuleNotFoundError:
-                # 最後保險：提供暫時 shim，避免應用掛掉
-                def build_targets(m, tech, poc_today, vp_full):
-                    """
-                    TODO: 之後以實際業務邏輯取代。
-                    先回傳一個可迭代的目標清單，過濾 None/空值，
-                    讓後續 for 迴圈或 list comprehension 可以正常運作。
-                    """
-                    items = []
-                    for grp in (m, tech, poc_today, vp_full):
-                        if grp is None:
-                            continue
-                        if isinstance(grp, (list, tuple, set)):
-                            items.extend([x for x in grp if x])
-                        else:
-                            items.append(grp)
-                    return items
-# --- end fix ---
 
 # =============================
 # 資料結構
@@ -1072,45 +1042,38 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
 # === 🚀 產生建議（中文術語 + 解釋版） ===
 st.subheader("🚀 產生建議")
 
-# 1) 技術分數（基礎）
-# 若前面已經有 result = analyze(...)，可刪除這行重算，直接沿用現有的 result
-# === 安全呼叫 analyze()（直接覆蓋你原本的 result = analyze(...) 那一行） ===
+# 先從 session 取得必要物件
+tech = st.session_state.get("tech_df")
+metrics_in_state = st.session_state.get("metrics")
+code_display = st.session_state.get("symbol_final", symbol)
 
-# 1) 檢查 analyze 是否存在
-if 'analyze' not in globals():
-    st.error("analyze() 尚未定義或被移除，請確認上方函式區仍保留 analyze。")
+if not metrics_in_state or tech is None or tech.empty:
+    st.warning("請先點選「🔎 抓取資料」，或手動輸入最基本欄位。")
     st.stop()
 
-# 2) 檢查 m 是否存在
-if 'm' not in globals() and 'm' not in locals():
-    st.error("技術資料物件 m 尚未建立。請確認在此區塊前已建構 m（例如 build_metrics/compute_tech 產生的物件）。")
-    st.stop()
+# 建立 Metrics 物件
+m = Metrics(**metrics_in_state)
 
-# 3) 取得（或先行計算）POC 變數；若沒有就先給 None（analyze 需支援可選參數）
-_poc_today = globals().get('poc_today', locals().get('poc_today', None))
-_poc_60    = globals().get('poc_60',    locals().get('poc_60',    None))
+# 取得 POC：優先當日，其次 60 日（日線量價分布）
+poc_today = session_poc_from_intraday(code_display)
+vp_60 = volume_profile(tech, lookback=60, bins=24) or {}
+# 兼容大小寫 key
+poc_60 = vp_60.get("POC", None) if isinstance(vp_60, dict) else None
+if poc_60 is None and isinstance(vp_60, dict):
+    poc_60 = vp_60.get("poc", None)
 
-# 如果你還沒算過 60 日量價分布，可在這裡補一個近似計算（已有 tech 時）：
-if _poc_60 is None and 'tech' in globals():
-    try:
-        vp60 = volume_profile(tech, lookback=60, bins=24)
-        # 你的 volume_profile 回傳格式可能不同，以下兩種取法擇一
-        _poc_60 = vp60.get('poc') if isinstance(vp60, dict) else getattr(vp60, 'poc', None)
-    except Exception:
-        _poc_60 = None
-
-# 4) 安全呼叫 analyze：若簽名不接受 poc_* 參數，退回 analyze(m)
+# 技術分數（帶 POC）
 try:
-    result = analyze(m, poc_today=_poc_today, poc_60=_poc_60)
+    result = analyze(m, poc_today=poc_today, poc_60=poc_60)
 except TypeError:
-    # 你的 analyze 簽名可能是 analyze(m) 或 analyze(m, **kwargs) 不含 poc_*
+    # 如果你的 analyze 簽名不接受 poc_*，退回舊版呼叫
     result = analyze(m)
 
-# 2) 加入 K 線形態加權
+# ===== K 線形態加權（中文名稱 + 解釋） =====
 patt = detect_candles(tech) if tech is not None else {}
 result, candle_note = adjust_scores_with_candles(result, patt)
 
-# 3) 顯示分數與決策
+# 顯示分數與決策
 c1, c2 = st.columns(2)
 with c1:
     st.metric("短線分數", result["short"]["score"])
@@ -1119,7 +1082,7 @@ with c2:
     st.metric("波段分數", result["swing"]["score"])
     st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
 
-# === 最近形態（中文 + 解釋） ===
+# 最近形態（中文 + 解釋）
 last_patterns = patt.get("last", [])
 translated = [CANDLE_TRANSLATE.get(p, (p, "")) for p in last_patterns]
 for name, desc in translated:
@@ -1133,11 +1096,14 @@ with st.expander("判斷依據 / 輸入數據"):
     st.write(result["notes"])
     st.json(result["inputs"])
 
-# 4) 目標價（自動）：日線 + 週線
-# 若上面已經算過 targets / wk，就不要重複計算；否則保留以下三行
-vp_full = volume_profile(tech, lookback=60, bins=24)
+# ===== 目標價（自動）：日線 + 週線 =====
+try:
+    vp_full = volume_profile(tech, lookback=60, bins=24) or {}
+except Exception:
+    vp_full = {}
+
 targets = build_targets(m, tech, poc_today, vp_full)
-wk = build_targets_weekly(m, tech, poc_today)
+wk      = build_targets_weekly(m, tech, poc_today)
 
 st.markdown("**短線目標**：{}".format(
     "-" if not targets.get("short_targets") else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
@@ -1152,9 +1118,40 @@ st.markdown("**中長距離（週線延伸）**：{}".format(
     "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
 ))
 
-# 5) 個人化持倉建議（把週線目標傳進去）
+# ===== 個人化持倉建議（把週線目標也帶入） =====
 st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
-pa = position_analysis(m, avg_cost, lots) if (avg_cost and lots) else None
+
+# ATR%（給風控使用）
+atr_pct = None
+if "ATR14_pct" in tech.columns:
+    _ap = tech["ATR14_pct"].dropna()
+    if not _ap.empty:
+        atr_pct = float(_ap.iloc[-1])
+
+# 使用右側輸入欄位
+avg_cost = None
+lots = None
+try:
+    avg_cost_str = st.session_state.get("avg_cost_input", "")
+    lots_str     = st.session_state.get("lots_input", "")
+except Exception:
+    avg_cost_str, lots_str = "", ""
+
+# 若你希望保留你上面「right 欄位」的 text_input，就用它們的變數
+# （這裡直接沿用你在 right 欄位建立的 avg_cost / lots）
+try:
+    # 右側欄位的字串已在上方轉 float 給 avg_cost / lots
+    pass
+except Exception:
+    pass
+
+# 如果上方 right 欄位的 avg_cost / lots 已經轉好了，就直接用
+if 'avg_cost' in locals() and avg_cost is not None and 'lots' in locals() and lots is not None:
+    pa = position_analysis(m, avg_cost, lots)
+else:
+    # 若沒有，就引導使用者輸入
+    pa = {}
+
 if pa:
     st.write(f"- 標的：**{code_display}**")
     st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
@@ -1165,11 +1162,13 @@ if pa:
         result["short"]["score"], result["swing"]["score"],
         m, pa, atr_pct,
         targets,
-        weekly_targets=wk   # 👈 關鍵：把週線目標一起納入建議判斷
+        weekly_targets=wk
     )
     st.success(suggestion)
 else:
     st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+# ↑↑↑ 請確保這行最後沒有多餘中文註解，否則會造成 SyntaxError
+
 
 
 
