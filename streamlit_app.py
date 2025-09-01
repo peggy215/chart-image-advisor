@@ -1049,17 +1049,6 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
             st.write(result["notes"])
             st.json(result["inputs"])
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.metric("短線分數", result["short"]["score"])
-            st.success(f"標的短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
-        with c2:
-            st.metric("波段分數", result["swing"]["score"])
-            st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
-
-        with st.expander("判斷依據 / 輸入數據"):
-            st.write(result["notes"])
-            st.json(result["inputs"])
 
         # 當日價量：VWAP + POC + 跳空
         st.subheader("📊 當日價量")
