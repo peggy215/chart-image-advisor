@@ -1041,119 +1041,79 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
         else:
             vp = None
 
-        # 分數（含 POC）
-        result = analyze(m, poc_today=poc_today, poc_60=poc_60)
-        # === 在 analyze() 之後，加入 K 線形態加權 ===
-        patt = detect_candles(tech) if tech is not None else {}
-        result, candle_note = adjust_scores_with_candles(result, patt)
+# === 🚀 產生建議（中文術語 + 解釋版） ===
+st.subheader("🚀 產生建議")
 
-        # 顯示分數與決策（使用調整後的 result）
-        c1, c2 = st.columns(2)
-        with c1:
-             st.metric("短線分數", result["short"]["score"])
-             st.success(f"標的短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
-        with c2:
-             st.metric("波段分數", result["swing"]["score"])
-             st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
+# 1) 技術分數（基礎）
+# 若前面已經有 result = analyze(...)，可刪除這行重算，直接沿用現有的 result
+result = analyze(m, poc_today=poc_today, poc_60=poc_60)
 
-        # 顯示形態與影響說明
-        # 將英文形態轉換成中文
-        last_patterns = patt.get("last", [])
-        translated = [CANDLE_TRANSLATE.get(p, p) for p in last_patterns]
-        st.caption(f"🕯️ 最近形態：{', '.join(translated) or '-'}")
+# 2) 加入 K 線形態加權
+patt = detect_candles(tech) if tech is not None else {}
+result, candle_note = adjust_scores_with_candles(result, patt)
 
-        # 顯示加權說明
-        st.caption(candle_note)
+# 3) 顯示分數與決策
+c1, c2 = st.columns(2)
+with c1:
+    st.metric("短線分數", result["short"]["score"])
+    st.success(f"標的短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
+with c2:
+    st.metric("波段分數", result["swing"]["score"])
+    st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
 
+# === 最近形態（中文 + 解釋） ===
+last_patterns = patt.get("last", [])
+translated = [CANDLE_TRANSLATE.get(p, (p, "")) for p in last_patterns]
+for name, desc in translated:
+    if desc:
+        st.caption(f"🕯️ 最近形態：{name} — {desc}")
+    else:
+        st.caption(f"🕯️ 最近形態：{name}")
+st.caption(candle_note)
 
-        with st.expander("判斷依據 / 輸入數據"):
-            st.write(result["notes"])
-            st.json(result["inputs"])
+with st.expander("判斷依據 / 輸入數據"):
+    st.write(result["notes"])
+    st.json(result["inputs"])
 
+# 4) 目標價（自動）：日線 + 週線
+# 若上面已經算過 targets / wk，就不要重複計算；否則保留以下三行
+vp_full = volume_profile(tech, lookback=60, bins=24)
+targets = build_targets(m, tech, poc_today, vp_full)
+wk = build_targets_weekly(m, tech, poc_today)
 
-        # 當日價量：VWAP + POC + 跳空
-        st.subheader("📊 當日價量")
-        st.caption("成交量加權平均價（VWAP，近似）：{}".format("-" if m.vwap_approx is None else f"{m.vwap_approx:.2f}"))
-        st.caption("控制價（POC，當日）：{}".format("-" if poc_today is None else f"{poc_today:.2f}"))
-        st.caption("控制價（POC，近60日）：{}".format("-" if poc_60 is None else f"{poc_60:.2f}"))
-        st.caption("跳空：{}".format("-" if m.gap_pct is None else f"{m.gap_pct:.2f}%"))
-        st.info(interpret_gap(m.gap_pct, m.vol_r5))
+st.markdown("**短線目標**：{}".format(
+    "-" if not targets.get("short_targets") else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
+))
+st.markdown("**波段目標**：{}".format(
+    "-" if not targets.get("swing_targets") else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
+))
+st.markdown("**中長距離（日線延伸）**：{}".format(
+    "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
+))
+st.markdown("**中長距離（週線延伸）**：{}".format(
+    "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
+))
 
-        # 支撐 / 壓力
-        atr_pct = None
-        if tech is not None and "ATR14_pct" in tech.columns:
-            try:
-                atr_pct = float(tech["ATR14_pct"].dropna().iloc[-1])
-            except Exception:
-                atr_pct = None
+# 5) 個人化持倉建議（把週線目標傳進去）
+st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
+pa = position_analysis(m, avg_cost, lots) if (avg_cost and lots) else None
+if pa:
+    st.write(f"- 標的：**{code_display}**")
+    st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
+    st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
 
-        if tech is not None:
-            st.subheader("📍 支撐 / 壓力 估算")
-            lv = estimate_levels(tech, m, poc_today, poc_60)
-            colS, colR = st.columns(2)
-            with colS:
-                st.markdown("**短線支撐**： " + (", ".join([f"{x:.2f}" for x in lv["short_supports"]]) if lv["short_supports"] else "-"))
-                st.markdown("**波段支撐**： " + (", ".join([f"{x:.2f}" for x in lv["swing_supports"]]) if lv["swing_supports"] else "-"))
-            with colR:
-                st.markdown("**短線壓力**： " + (", ".join([f"{x:.2f}" for x in lv["short_resistances"]]) if lv["short_resistances"] else "-"))
-                st.markdown("**波段壓力**： " + (", ".join([f"{x:.2f}" for x in lv["swing_resistances"]]) if lv["swing_resistances"] else "-"))
-
-        # 🎯 目標價（自動）
-        st.subheader("🎯 目標價（自動）")
-
-        # 日線目標價
-        vp_full = volume_profile(tech, lookback=60, bins=24)
-        targets = build_targets(m, tech, poc_today, vp_full)
-
-        st.markdown("**短線目標**（近）：{}".format(
-            "-" if not targets["short_targets"] else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
-        ))
-        st.markdown("**波段目標**（中）：{}".format(
-            "-" if not targets["swing_targets"] else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
-        ))
-        st.markdown("**中長距離目標（日線延伸）**：{}".format(
-            "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
-        ))
-
-        with st.expander("目標價計算明細 / 依據（每日線）"):
-            st.write(targets["explain"])
-            st.json(targets["components"])
-
-        # 週線目標價
-        wk = build_targets_weekly(m, tech, poc_today)
-        st.markdown("**中長距離目標（週線延伸）**：{}".format(
-           "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
-        ))
-        with st.expander("目標價計算明細 / 依據（週線）"):
-            st.write(wk["explain"])
-            st.json(wk["components"])
+    suggestion = personalized_action(
+        code_display,
+        result["short"]["score"], result["swing"]["score"],
+        m, pa, atr_pct,
+        targets,
+        weekly_targets=wk   # 👈 關鍵：把週線目標一起納入建議判斷
+    )
+    st.success(suggestion)
+else:
+    st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
 
 
-        # 個人化持倉建議（已接上日線 + 週線目標條件）
-        pa = position_analysis(m, avg_cost, lots)
-        st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
-
-        if pa:
-           st.write(f"- 標的：**{code_display}**")
-           st.write(f"- 平均成本：{avg_cost:.2f}，現價：{m.close:.2f}，**報酬率：{pa['ret_pct']:.2f}%**")
-           st.write(f"- 庫存：{int(pa['shares']):,} 股（約 {pa['lots']} 張），未實現損益：約 **{pa['unrealized']:.0f} 元**")
-
-           # 先算目標價（若你前面已有，可略過重算）
-           vp_full = volume_profile(tech, lookback=60, bins=24)
-           targets = build_targets(m, tech, poc_today, vp_full)
-           wk = build_targets_weekly(m, tech, poc_today)
-
-           # 核心：把週線目標傳入 personalized_action
-           suggestion = personalized_action(
-              code_display,
-              result["short"]["score"], result["swing"]["score"],
-              m, pa, atr_pct,
-              targets,
-              weekly_targets=wk   # 👈 關鍵差異：加入週線目標
-           )
-           st.success(suggestion)
-        else:
-           st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
 
 
 
