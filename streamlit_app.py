@@ -760,56 +760,136 @@ def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
 
 
 # ===== 將 K 線形態加到分數（日線短/波段） =====
-def adjust_scores_with_candles(result: dict, patt: dict) -> tuple[dict, str]:
+def adjust_scores_with_candles_filtered(result: dict,
+                                        patt: dict,
+                                        m: Metrics,
+                                        levels: dict,
+                                        *,
+                                        vol_ratio_need: float = 1.0,   # 量能過濾門檻：Vol / MV20 >= 1.0
+                                        near_pct: float = 2.0          # 位置過濾門檻：距離支撐/壓力 <= 2%
+                                        ) -> tuple[dict, str]:
     """
-    在 analyze() 的結果上，根據 K 線形態做小幅加減分，並回傳說明文字。
-    （不直接改 analyze()，避免侵入式大改；這裡做後處理）
+    形態 + 量能過濾 + 位置過濾 的加權版：
+      - 多頭形態（Bull_* / Hammer/HS / MorningStar / 大陽棒）→ 僅在『量能達標 & 僅在靠近支撐』時才加分
+      - 空頭形態（Bear_* / ShootingStar / EveningStar / 大陰棒）→ 僅在『量能達標 & 靠近壓力』時才加分
+    備註：
+      - levels 來自 estimate_levels() 的輸出，用到 short/swing 支撐與壓力
+      - m 需有 close / volume / MV20
     """
-    if not result or not patt:
-        return result, ""
+    if not result or not patt or m is None:
+        return result, "🕯️ K線形態：資料不足，未計分。"
 
-    # 複製 result，避免原 dict 被就地修改
+    # 取輸入的拷貝
     res = {
         "short": dict(result.get("short", {})),
         "swing": dict(result.get("swing", {})),
         "notes": list(result.get("notes", [])),
         "inputs": result.get("inputs", {}),
     }
-
     short_score = int(res["short"].get("score", 50))
     swing_score = int(res["swing"].get("score", 50))
 
-    delta_s, delta_w = 0, 0
-    last_tags = patt.get("last", [])
+    # 量能過濾（Vol / MV20）
+    vol_ok = False
+    vol_note = ""
+    if (m.volume is not None) and (m.MV20 is not None) and (m.MV20 > 0):
+        vol_ratio = float(m.volume) / float(m.MV20)
+        vol_ok = vol_ratio >= vol_ratio_need
+        vol_note = f"量能比≈{vol_ratio:.2f}（門檻 {vol_ratio_need:.2f}）"
+    else:
+        vol_note = "量能比：無法計算"
 
-    if patt.get("bullish"):
-        delta_s += 3; delta_w += 2
-        res["notes"].append(f"K線形態偏多 {last_tags} (+3/+2)")
-    if patt.get("bearish"):
-        delta_s -= 3; delta_w -= 2
-        res["notes"].append(f"K線形態偏空 {last_tags} (-3/-2)")
+    # 位置過濾：靠近支撐 / 壓力（%）
+    def _near_any(price: float, refs: list[float], side: str) -> float:
+        """
+        回傳『最近』的距離（百分比）；找不到就回 np.inf
+        side='support' 表示只考慮低於價格的支撐；side='resistance' 只考慮高於價格的壓力
+        """
+        best = np.inf
+        if refs:
+            for v in refs:
+                if v is None or not np.isfinite(v):
+                    continue
+                if side == "support" and v < price:
+                    gap = abs((price / v - 1.0) * 100.0)
+                    if gap < best:
+                        best = gap
+                if side == "resistance" and v > price:
+                    gap = abs((v / price - 1.0) * 100.0)
+                    if gap < best:
+                        best = gap
+        return best
+
+    price = m.close if m.close is not None else np.nan
+    s_supp = (levels or {}).get("short_supports", []) + (levels or {}).get("swing_supports", [])
+    s_resi = (levels or {}).get("short_resistances", []) + (levels or {}).get("swing_resistances", [])
+    dist_support = _near_any(price, s_supp, "support") if np.isfinite(price) else np.inf
+    dist_resist  = _near_any(price, s_resi, "resistance") if np.isfinite(price) else np.inf
+    near_sup_ok = dist_support <= near_pct
+    near_res_ok = dist_resist  <= near_pct
+
+    # 分類形態
+    last_tags = patt.get("last", [])
+    bullish_tags = {"Bull_Marubozu", "Bull_Engulfing", "MorningStar", "Hammer/HS"}
+    bearish_tags = {"Bear_Marubozu", "Bear_Engulfing", "EveningStar", "ShootingStar"}
+    has_bull = any(t in bullish_tags for t in last_tags)
+    has_bear = any(t in bearish_tags for t in last_tags)
+    has_doji = any(t == "Doji" for t in last_tags)   # 中性，不計分，只附註
+
+    # 計分：量能 + 位置都符合 → 比較大的加權；只符合其一 → 較小加權；都不符合 → 不加分
+    delta_s = delta_w = 0
+
+    if has_bull:
+        if vol_ok and near_sup_ok:
+            delta_s += 4; delta_w += 3
+            res["notes"].append(f"多頭形態 + 量能 + 支撐（{vol_note}，距支撐≈{dist_support:.2f}%）(+4/+3)")
+        elif vol_ok or near_sup_ok:
+            delta_s += 2; delta_w += 1
+            tip = "量能" if vol_ok else "位置"
+            res["notes"].append(f"多頭形態 + {tip}條件部分成立（{vol_note}，距支撐≈{dist_support:.2f}%）(+2/+1)")
+        else:
+            res["notes"].append(f"多頭形態，但量縮且不靠支撐（{vol_note}，距支撐≈{dist_support:.2f}%）(+0)")
+
+    if has_bear:
+        if vol_ok and near_res_ok:
+            delta_s -= 4; delta_w -= 3
+            res["notes"].append(f"空頭形態 + 量能 + 壓力（{vol_note}，距壓力≈{dist_resist:.2f}%）(-4/-3)")
+        elif vol_ok or near_res_ok:
+            delta_s -= 2; delta_w -= 1
+            tip = "量能" if vol_ok else "位置"
+            res["notes"].append(f"空頭形態 + {tip}條件部分成立（{vol_note}，距壓力≈{dist_resist:.2f}%）(-2/-1)")
+        else:
+            res["notes"].append(f"空頭形態，但量縮且不靠壓力（{vol_note}，距壓力≈{dist_resist:.2f}%）(+0)")
+
+    if has_doji:
+        res["notes"].append("十字星（多空拉鋸，僅提醒，不計分）")
 
     short_score += delta_s
     swing_score += delta_w
 
-    def decision(score: int):
+    # 更新 decision
+    def _decision(score: int):
         if score >= 65: return "BUY / 加碼", "偏多，可分批買進或續抱"
         elif score >= 50: return "HOLD / 觀望", "中性，等突破或訊號"
         else: return "SELL / 減碼", "偏空，逢反彈減碼或停損"
 
     res["short"]["score"] = short_score
-    res["short"]["decision"] = decision(short_score)
+    res["short"]["decision"] = _decision(short_score)
     res["swing"]["score"] = swing_score
-    res["swing"]["decision"] = decision(swing_score)
+    res["swing"]["decision"] = _decision(swing_score)
 
-    note_text = ""
-    if delta_s or delta_w:
-        sign = "↑" if (delta_s + delta_w) > 0 else "↓"
-        note_text = f"🕯️ K線形態影響：短線 {('+' if delta_s>=0 else '')}{delta_s}、波段 {('+' if delta_w>=0 else '')}{delta_w}（{sign}）"
+    # 說明字串
+    msg = []
+    if has_bull or has_bear or has_doji:
+        msg.append("🕯️ 形態加權（含過濾）：")
+        msg.append(f"・量能過濾：需要 Vol/MV20 ≥ {vol_ratio_need:.2f}（{vol_note}）")
+        msg.append(f"・位置過濾：距離支撐/壓力 ≤ {near_pct:.1f}% 才較具意義")
+        msg.append(f"・本次距支撐≈{dist_support if np.isfinite(dist_support) else float('nan'):.2f}%、距壓力≈{dist_resist if np.isfinite(dist_resist) else float('nan'):.2f}%")
     else:
-        note_text = "🕯️ K線形態影響：中性（無明顯偏多/偏空形態）"
+        msg.append("🕯️ 形態：無明顯訊號或資料不足。")
 
-    return res, note_text
+    return res, " ".join(msg)
+
 
 # =============================
 # 風控 / 個人化動作（已接上目標價）
@@ -1098,7 +1178,13 @@ except TypeError:
 
 # ===== K 線形態加權（中文名稱 + 解釋） =====
 patt = detect_candles(tech) if tech is not None else {}
-result, candle_note = adjust_scores_with_candles(result, patt)
+# 先算 levels（如果你還沒算）
+levels = estimate_levels(tech, m, poc_today, poc_60)
+
+# 再做「形態 + 量能/位置 過濾加權」
+result, candle_note = adjust_scores_with_candles_filtered(result, patt, m, levels,
+                                                          vol_ratio_need=1.0,  # 可調：1.0 或 1.2
+                                                          near_pct=2.0)        # 可調：2%
 
 # 顯示分數與決策
 c1, c2 = st.columns(2)
