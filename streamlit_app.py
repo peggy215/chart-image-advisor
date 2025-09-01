@@ -872,15 +872,18 @@ def adjust_scores_with_candles_filtered(result: dict,
     res["swing"]["score"] = swing_score
     res["swing"]["decision"] = _decision(swing_score)
 
-    # 說明字串
-    msg = []
-    if has_bull or has_bear or has_doji:
-        msg.append("🕯️ 形態加權（含過濾）：")
-        msg.append(f"・量能過濾：需要 Vol/MV20 ≥ {vol_ratio_need:.2f}（{vol_note}）")
-        msg.append(f"・位置過濾：距離支撐/壓力 ≤ {near_pct:.1f}% 才較具意義")
-        msg.append(f"・本次距支撐≈{dist_support if np.isfinite(dist_support) else float('nan'):.2f}%、距壓力≈{dist_resist if np.isfinite(dist_resist) else float('nan'):.2f}%")
-    else:
-        msg.append("🕯️ 形態：無明顯訊號或資料不足。")
+    # === 精簡輸出 ===
+if passed:
+    msg_lines = [
+        "✅ 形態加權：有效（有量、靠近支撐/壓力）",
+        "量能：符合（大於 20 日均量）" if vol_ok else "量能：不符合（量不足）",
+        "位置：符合（股價接近支撐/壓力）" if near_ok else "位置：不符合（離支撐/壓力較遠）",
+        "📌 說明：這個 K 線形態是可信的，因為今天有放量，股價又剛好靠在支撐/壓力附近。" if (vol_ok and near_ok) else "📌 說明：條件不足，形態參考性較低。"
+    ]
+    note_text = "\n".join(msg_lines)
+else:
+    note_text = "🕯️ K 線形態影響：中性（無明顯偏多/偏空形態）"
+
 
     return res, " ".join(msg)
 
