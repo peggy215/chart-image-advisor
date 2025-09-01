@@ -761,29 +761,29 @@ def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
 
 # ===== 將 K 線形態加到分數（日線短/波段） =====
     def adjust_scores_with_candles_filtered(
-        result: dict,
-        patt: dict,
-        m: Metrics,
-        levels: dict,
-        *,
-        vol_ratio_need: float = 1.2,   # 量能過濾門檻：Vol / MV20 >= 1.2
-        near_pct: float = 2.0          # 位置過濾門檻：距離支撐/壓力 <= 2%
-     ) -> tuple[dict, str]:
+    result: dict,
+    patt: dict,
+    m: Metrics,
+    levels: dict,
+    *,
+    vol_ratio_need: float = 1.2,   # 量能門檻：Vol / MV20 >= 1.2
+    near_pct: float = 2.0          # 位置門檻：距支撐/壓力 <= 2%
+) -> tuple[dict, str]:
     """
-    	形態加權（含過濾）：
+    形態加權（含過濾）：
       - 量能過濾：Vol / MV20 >= vol_ratio_need 才具備參考價值
-      - 位置過濾：距離最近支撐/壓力 <= near_pct% 才具備參考價值
+      - 位置過濾：距最近支撐/壓力 <= near_pct% 才具備參考價值
       - 加分幅度：
           * 量能 + 位置皆符合：短線 ±4、波段 ±3
           * 只符合其中一項：短線 ±2、波段 ±1
           * 都不符合：不加分（只顯示中性訊息）
-    	輸出說明為精簡易懂版本。
+    輸出為使用者友善的精簡版文字。
     """
-    # 若沒有結果或沒有形態，直接回中性說明
-    if not result or not patt or ("last" not in patt and not (patt.get("bullish") or patt.get("bearish"))):
+    # 無資料/無形態 → 中性
+    if not result or not patt:
         return result, "🕯️ 形態加權：中性（無明顯偏多/偏空形態）"
 
-    # 取目前的分數
+    # 取當前分數
     res = {
         "short": dict(result.get("short", {})),
         "swing": dict(result.get("swing", {})),
@@ -795,108 +795,90 @@ def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
 
     # 輔助：距離百分比
     def pct_diff(a: float, b: float) -> float:
-        if a is None or b is None or b == 0: 
+        if a is None or b is None or b == 0:
             return float("inf")
         return abs(a / b - 1.0) * 100.0
 
-    close = m.close
-    mv20  = m.MV20
-    vol   = m.volume
+    close, mv20, vol = m.close, m.MV20, m.volume
 
-    # ===== 量能過濾 =====
+    # === 量能過濾 ===
     vol_ok = False
     if vol is not None and mv20 is not None and mv20 > 0:
-        vol_ratio = vol / mv20
-        vol_ok = (vol_ratio >= vol_ratio_need)
-    else:
-        vol_ratio = None  # 無法判斷量能
+        vol_ok = (vol / mv20) >= vol_ratio_need
 
-    # ===== 位置過濾：找最近支撐/壓力 =====
-    # levels 來自 estimate_levels()，包含短/波段支撐與壓力
+    # === 位置過濾（用最近支撐/壓力） ===
     supports = (levels.get("short_supports", []) or []) + (levels.get("swing_supports", []) or [])
     resistances = (levels.get("short_resistances", []) or []) + (levels.get("swing_resistances", []) or [])
 
-    # 找離當前最近的支撐（小於現價）與壓力（大於現價）
-    near_support = None
-    if supports and close is not None:
-        below = [s for s in supports if s is not None and s < close]
-        if below:
-            near_support = max(below)  # 最近的下方支撐
+    near_support = max([s for s in supports if s is not None and close is not None and s < close], default=None)
+    near_resist  = min([r for r in resistances if r is not None and close is not None and r > close], default=None)
 
-    near_resist = None
-    if resistances and close is not None:
-        above = [r for r in resistances if r is not None and r > close]
-        if above:
-            near_resist = min(above)   # 最近的上方壓力
+    d_sup = pct_diff(close, near_support) if near_support is not None else float("inf")
+    d_res = pct_diff(close, near_resist)  if near_resist  is not None else float("inf")
+    near_ok = min(d_sup, d_res) <= near_pct
 
-    # 是否「靠近」支撐/壓力（取最近一側）
-    near_ok = False
-    if close is not None:
-        d_sup = pct_diff(close, near_support) if near_support is not None else float("inf")
-        d_res = pct_diff(close, near_resist)  if near_resist  is not None else float("inf")
-        near_ok = (min(d_sup, d_res) <= near_pct)
-    else:
-        d_sup = d_res = float("inf")
-
-    # ===== 形態是偏多還是偏空 =====
+    # === 形態方向 ===
     is_bull = bool(patt.get("bullish"))
     is_bear = bool(patt.get("bearish"))
 
-    # 決定加權
+    # === 加權 ===
     delta_s = 0
     delta_w = 0
     if is_bull or is_bear:
-        # 同時考慮量能與位置
         if vol_ok and near_ok:
-            delta_s = 4
-            delta_w = 3
+            delta_s, delta_w = 4, 3
         elif vol_ok or near_ok:
-            delta_s = 2
-            delta_w = 1
-        else:
-            delta_s = 0
-            delta_w = 0
-
-        # 空方形態 → 取相反號
+            delta_s, delta_w = 2, 1
         if is_bear:
-            delta_s *= -1
-            delta_w *= -1
-
+            delta_s, delta_w = -delta_s, -delta_w
         short_score += delta_s
         swing_score += delta_w
 
-    # 更新 result 的分數與決策
+    # 更新決策
     def decision(score: int):
-        if score >= 65: return "BUY / 加碼", "偏多，可分批買進或續抱"
-        elif score >= 50: return "HOLD / 觀望", "中性，等突破或訊號"
-        else: return "SELL / 減碼", "偏空，逢反彈減碼或停損"
+        if score >= 65:
+            return "BUY / 加碼", "偏多，可分批買進或續抱"
+        elif score >= 50:
+            return "HOLD / 觀望", "中性，等突破或訊號"
+        else:
+            return "SELL / 減碼", "偏空，逢反彈減碼或停損"
 
     res["short"]["score"] = short_score
     res["short"]["decision"] = decision(short_score)
     res["swing"]["score"] = swing_score
     res["swing"]["decision"] = decision(swing_score)
 
-    # ===== 精簡說明（你要的格式） =====
+    # === 精簡輸出（你要的文案） ===
     passed = (is_bull or is_bear) and (vol_ok or near_ok)
-
     if passed:
-        msg_lines = [
-            "✅ 形態加權：有效（有量、靠近支撐/壓力）" if (vol_ok and near_ok) else
-            ("✅ 形態加權：部分成立（有量）" if vol_ok else "✅ 形態加權：部分成立（靠近支撐/壓力）"),
-            ("量能：符合（大於 20 日均量）" if vol_ok else "量能：不符合（量不足）"),
-            ("位置：符合（股價接近支撐/壓力）" if near_ok else "位置：不符合（離支撐/壓力較遠）"),
-            ("📌 說明：這個 K 線形態是可信的，因為今天有放量，股價又剛好靠在支撐/壓力附近。"
-             if (vol_ok and near_ok)
-             else "📌 說明：條件僅部分符合，形態參考性普通。")
-        ]
-        note_text = "\n".join(msg_lines)
+        if vol_ok and near_ok:
+            note_text = (
+                "✅ 形態加權：有效（有量、靠近支撐/壓力）\n"
+                "量能：符合（大於 20 日均量）\n"
+                "位置：符合（股價接近支撐/壓力）\n"
+                "📌 說明：這個 K 線形態是可信的，因為今天有放量，股價又剛好靠在支撐/壓力附近。"
+            )
+        elif vol_ok:
+            note_text = (
+                "✅ 形態加權：部分成立（有量）\n"
+                "量能：符合（大於 20 日均量）\n"
+                "位置：不符合（離支撐/壓力較遠）\n"
+                "📌 說明：僅有放量，參考性普通。"
+            )
+        else:
+            note_text = (
+                "✅ 形態加權：部分成立（靠近支撐/壓力）\n"
+                "量能：不符合（量不足）\n"
+                "位置：符合（股價接近支撐/壓力）\n"
+                "📌 說明：僅位置貼近，參考性普通。"
+            )
     else:
         note_text = "🕯️ 形態加權：中性（條件不足，未採納形態加分）"
 
-    # 附註：把中文結論也加進 notes 方便在「判斷依據」展開時看得到
+    # 讓判斷依據也看得到結論第一行
     res["notes"].append(note_text.splitlines()[0])
-
     return res, note_text
+
 
 
 
@@ -1189,7 +1171,8 @@ except TypeError:
 # ===== K 線形態加權（中文名稱 + 解釋） =====
 patt = detect_candles(tech) if tech is not None else {}
 
-# 先算支撐/壓力（若你前面已經算過 levels，就用你現有的）
+
+# 支撐/壓力（若前面已算過 levels 就略過這行）
 levels = estimate_levels(tech, m, poc_today, poc_60)
 
 # 形態偵測（你原本就有）
@@ -1198,10 +1181,11 @@ patt = detect_candles(tech) if tech is not None else {}
 # 使用「過濾後」的形態加權 + 精簡說明
 result, candle_note = adjust_scores_with_candles_filtered(
     result, patt, m, levels,
-    vol_ratio_need=1.2,   # 量能門檻：Vol/MV20 >= 1.2
-    near_pct=2.0          # 位置門檻：距支撐/壓力 <= 2%
+    vol_ratio_need=1.2,   # 想更嚴格可改 1.3~1.5
+    near_pct=2.0          # 更短線 1.5；波段 3.0
 )
 st.caption(candle_note)
+
 
 
 
