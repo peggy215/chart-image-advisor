@@ -956,8 +956,15 @@ with cA:
     fetch_now = st.button("🔎 抓取資料", use_container_width=True)
 with cB:
     if st.button("🧹 清空/重置", use_container_width=True):
-        for k in list(st.session_state.keys()):
-            del st.session_state[k]
+        # 一次清掉所有用到的 session_state 值
+        for k in [
+            "metrics", "tech_df", "symbol_final",
+            "avg_cost_input", "lots_input"
+        ]:
+            st.session_state.pop(k, None)
+        st.success("已重置")
+        st.rerun()  # 立刻重新載入，輸入框會回到空白
+
 with cC:
     st.write("")
 
