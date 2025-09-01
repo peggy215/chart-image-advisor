@@ -1189,15 +1189,20 @@ except TypeError:
 # ===== K 線形態加權（中文名稱 + 解釋） =====
 patt = detect_candles(tech) if tech is not None else {}
 
-# 支撐/壓力（若前面已算過 levels 就不要重複）
+# 先算支撐/壓力（若你前面已經算過 levels，就用你現有的）
 levels = estimate_levels(tech, m, poc_today, poc_60)
 
-# 形態 + 量能 + 位置 過濾加權（可調整門檻：量能 1.0、位置 2%）
+# 形態偵測（你原本就有）
+patt = detect_candles(tech) if tech is not None else {}
+
+# 使用「過濾後」的形態加權 + 精簡說明
 result, candle_note = adjust_scores_with_candles_filtered(
     result, patt, m, levels,
-    vol_ratio_need=1.2,   # 放嚴格一點可改 1.2,寬鬆一點可改 1.2
-    near_pct=2.0          # 更短線可改 1.5；波段可改 3
+    vol_ratio_need=1.2,   # 量能門檻：Vol/MV20 >= 1.2
+    near_pct=2.0          # 位置門檻：距支撐/壓力 <= 2%
 )
+st.caption(candle_note)
+
 
 
 # 顯示分數與決策
