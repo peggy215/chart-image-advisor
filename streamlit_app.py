@@ -1,7 +1,8 @@
 # streamlit_app.py
 # -*- coding: utf-8 -*-
 from dataclasses import dataclass, asdict
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
+
 
 import pandas as pd
 import numpy as np
@@ -759,31 +760,30 @@ def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
     return res
 
 
-# ===== 將 K 線形態加到分數（日線短/波段） =====
-    def adjust_scores_with_candles_filtered(
+def adjust_scores_with_candles_filtered(
     result: dict,
     patt: dict,
     m: Metrics,
     levels: dict,
     *,
     vol_ratio_need: float = 1.2,   # 量能門檻：Vol / MV20 >= 1.2
-    near_pct: float = 2.0          # 位置門檻：距支撐/壓力 <= 2% 
-    ) -> tuple[dict, str]:
-     """
-      形態加權（含過濾）：
-       - 量能過濾：Vol / MV20 >= vol_ratio_need 才具備參考價值
-       - 位置過濾：距最近支撐/壓力 <= near_pct% 才具備參考價值
-       - 加分幅度：
+    near_pct: float = 2.0          # 位置門檻：距支撐/壓力 <= 2%
+) -> Tuple[dict, str]:
+    """
+    形態加權（含過濾）：
+      - 量能過濾：Vol / MV20 >= vol_ratio_need 才具備參考價值
+      - 位置過濾：距最近支撐/壓力 <= near_pct% 才具備參考價值
+      - 加分幅度：
           * 量能 + 位置皆符合：短線 ±4、波段 ±3
           * 只符合其中一項：短線 ±2、波段 ±1
           * 都不符合：不加分（只顯示中性訊息）
-      輸出為使用者友善的精簡版文字。
-      """
+    輸出會回傳（更新後的 result, 使用者可讀的說明文字）
+    """
     # 無資料/無形態 → 中性
     if not result or not patt:
         return result, "🕯️ 形態加權：中性（無明顯偏多/偏空形態）"
 
-    # 取當前分數
+    # 取當前分數（複製 dict，避免就地修改）
     res = {
         "short": dict(result.get("short", {})),
         "swing": dict(result.get("swing", {})),
@@ -875,9 +875,10 @@ def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
     else:
         note_text = "🕯️ 形態加權：中性（條件不足，未採納形態加分）"
 
-    # 讓判斷依據也看得到結論第一行
+    # 讓「判斷依據」也看得到結論第一行
     res["notes"].append(note_text.splitlines()[0])
     return res, note_text
+
 
 
 
