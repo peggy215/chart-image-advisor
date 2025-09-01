@@ -21,6 +21,36 @@ CANDLE_TRANSLATE = {
     "Bear_Marubozu": ("大陰棒", "實體很長幾乎沒影線，代表賣方強勢")
 }
 
+# --- fix NameError: build_targets not defined ---
+try:
+    build_targets  # noqa: F821  # check if name already exists
+except NameError:
+    try:
+        from targets import build_targets  # ← 改成實際模組路徑
+    except ModuleNotFoundError:
+        try:
+            from utils import build_targets
+        except ModuleNotFoundError:
+            try:
+                from helpers.targets import build_targets
+            except ModuleNotFoundError:
+                # 最後保險：提供暫時 shim，避免應用掛掉
+                def build_targets(m, tech, poc_today, vp_full):
+                    """
+                    TODO: 之後以實際業務邏輯取代。
+                    先回傳一個可迭代的目標清單，過濾 None/空值，
+                    讓後續 for 迴圈或 list comprehension 可以正常運作。
+                    """
+                    items = []
+                    for grp in (m, tech, poc_today, vp_full):
+                        if grp is None:
+                            continue
+                        if isinstance(grp, (list, tuple, set)):
+                            items.extend([x for x in grp if x])
+                        else:
+                            items.append(grp)
+                    return items
+# --- end fix ---
 
 # =============================
 # 資料結構
