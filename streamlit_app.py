@@ -684,7 +684,119 @@ def build_targets_weekly(m: Metrics,
         "explain": explain
     }
 
+# ===== K 線形態偵測（單根/組合，簡化版） =====
+def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
+    """
+    回傳最近一根K線的形態標記與多空傾向。
+    規則保守：只偵測常見而直觀的形態，避免過度干擾。
+    """
+    d = df.dropna().tail(max(lookback, 3)).copy()
+    if d.empty:
+        return {}
 
+    def body(o, c): return abs(c - o)
+    def upper(h, o, c): return h - max(o, c)
+    def lower(l, o, c): return min(o, c) - l
+
+    res = {"last": []}
+    o = float(d["Open"].iloc[-1]); h = float(d["High"].iloc[-1])
+    l = float(d["Low"].iloc[-1]);  c = float(d["Close"].iloc[-1])
+
+    rng = max(h - l, 1e-8)
+    b = body(o, c); u = upper(h, o, c); w = lower(l, o, c)
+    b_pct = b / rng; u_pct = u / rng; w_pct = w / rng
+
+    # 1) Doji
+    if b_pct <= 0.1 and u_pct >= 0.2 and w_pct >= 0.2:
+        res["last"].append("Doji")
+
+    # 2) Hammer / Hanging Man（下影長、上影短、實體小）
+    if w_pct >= 0.5 and u_pct <= 0.2 and b_pct <= 0.3:
+        res["last"].append("Hammer/HS")
+
+    # 3) Shooting Star（上影長、下影短、實體小）
+    if u_pct >= 0.5 and w_pct <= 0.2 and b_pct <= 0.3:
+        res["last"].append("ShootingStar")
+
+    # 4) Marubozu（大陽/大陰，實體占比大，影線短）
+    if b_pct >= 0.7 and u_pct <= 0.15 and w_pct <= 0.15:
+        res["last"].append("Bull_Marubozu" if c > o else "Bear_Marubozu")
+
+    # 5) Engulfing（吞噬，簡化）
+    if len(d) >= 2:
+        o1 = float(d["Open"].iloc[-2]); c1 = float(d["Close"].iloc[-2])
+        b1 = abs(c1 - o1)
+        if b > b1 * 1.05:
+            if c > o and c1 < o1 and c >= max(o1, c1) and o <= min(o1, c1):
+                res["last"].append("Bull_Engulfing")
+            if c < o and c1 > o1 and o >= min(o1, c1) and c <= min(o1, c1):
+                res["last"].append("Bear_Engulfing")
+
+    # 6) Morning/Evening Star（簡化三根）
+    if len(d) >= 3:
+        o2, c2 = float(d["Open"].iloc[-3]), float(d["Close"].iloc[-3])
+        o1, c1 = float(d["Open"].iloc[-2]), float(d["Close"].iloc[-2])
+        cond_morning = (c2 < o2 and abs(c1 - o1) < abs(c2 - o2) * 0.6 and c > o and c >= (o2 + c2) / 2)
+        cond_evening = (c2 > o2 and abs(c1 - o1) < abs(c2 - o2) * 0.6 and c < o and c <= (o2 + c2) / 2)
+        if cond_morning: res["last"].append("MorningStar")
+        if cond_evening: res["last"].append("EveningStar")
+
+    res["bullish"] = any(x in res["last"] for x in ["Bull_Marubozu","Bull_Engulfing","MorningStar","Hammer/HS"])
+    res["bearish"] = any(x in res["last"] for x in ["Bear_Marubozu","Bear_Engulfing","EveningStar","ShootingStar"])
+    return res
+
+
+# ===== 將 K 線形態加到分數（日線短/波段） =====
+def adjust_scores_with_candles(result: dict, patt: dict) -> tuple[dict, str]:
+    """
+    在 analyze() 的結果上，根據 K 線形態做小幅加減分，並回傳說明文字。
+    （不直接改 analyze()，避免侵入式大改；這裡做後處理）
+    """
+    if not result or not patt:
+        return result, ""
+
+    # 複製 result，避免原 dict 被就地修改
+    res = {
+        "short": dict(result.get("short", {})),
+        "swing": dict(result.get("swing", {})),
+        "notes": list(result.get("notes", [])),
+        "inputs": result.get("inputs", {}),
+    }
+
+    short_score = int(res["short"].get("score", 50))
+    swing_score = int(res["swing"].get("score", 50))
+
+    delta_s, delta_w = 0, 0
+    last_tags = patt.get("last", [])
+
+    if patt.get("bullish"):
+        delta_s += 3; delta_w += 2
+        res["notes"].append(f"K線形態偏多 {last_tags} (+3/+2)")
+    if patt.get("bearish"):
+        delta_s -= 3; delta_w -= 2
+        res["notes"].append(f"K線形態偏空 {last_tags} (-3/-2)")
+
+    short_score += delta_s
+    swing_score += delta_w
+
+    def decision(score: int):
+        if score >= 65: return "BUY / 加碼", "偏多，可分批買進或續抱"
+        elif score >= 50: return "HOLD / 觀望", "中性，等突破或訊號"
+        else: return "SELL / 減碼", "偏空，逢反彈減碼或停損"
+
+    res["short"]["score"] = short_score
+    res["short"]["decision"] = decision(short_score)
+    res["swing"]["score"] = swing_score
+    res["swing"]["decision"] = decision(swing_score)
+
+    note_text = ""
+    if delta_s or delta_w:
+        sign = "↑" if (delta_s + delta_w) > 0 else "↓"
+        note_text = f"🕯️ K線形態影響：短線 {('+' if delta_s>=0 else '')}{delta_s}、波段 {('+' if delta_w>=0 else '')}{delta_w}（{sign}）"
+    else:
+        note_text = "🕯️ K線形態影響：中性（無明顯偏多/偏空形態）"
+
+    return res, note_text
 
 # =============================
 # 風控 / 個人化動作（已接上目標價）
@@ -916,6 +1028,26 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
 
         # 分數（含 POC）
         result = analyze(m, poc_today=poc_today, poc_60=poc_60)
+        # === 在 analyze() 之後，加入 K 線形態加權 ===
+        patt = detect_candles(tech) if tech is not None else {}
+        result, candle_note = adjust_scores_with_candles(result, patt)
+
+        # 顯示分數與決策（使用調整後的 result）
+        c1, c2 = st.columns(2)
+        with c1:
+             st.metric("短線分數", result["short"]["score"])
+             st.success(f"標的短線：{result['short']['decision'][0]} — {result['short']['decision'][1]}")
+        with c2:
+             st.metric("波段分數", result["swing"]["score"])
+             st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
+
+       # 顯示形態與影響說明
+       st.caption(f"🕯️ 最近形態：{', '.join(patt.get('last', [])) or '-'}")
+       st.caption(candle_note)
+
+       with st.expander("判斷依據 / 輸入數據"):
+            st.write(result["notes"])
+            st.json(result["inputs"])
 
         c1, c2 = st.columns(2)
         with c1:
