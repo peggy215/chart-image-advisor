@@ -770,7 +770,7 @@ def adjust_scores_with_candles_filtered(result: dict,
                                         ) -> tuple[dict, str]:
     """
     形態 + 量能過濾 + 位置過濾 的加權版：
-      - 多頭形態（Bull_* / Hammer/HS / MorningStar / 大陽棒）→ 僅在『量能達標 & 僅在靠近支撐』時才加分
+      - 多頭形態（Bull_* / Hammer/HS / MorningStar / 大陽棒）→ 僅在『量能達標 & 靠近支撐』時才加分
       - 空頭形態（Bear_* / ShootingStar / EveningStar / 大陰棒）→ 僅在『量能達標 & 靠近壓力』時才加分
     備註：
       - levels 來自 estimate_levels() 的輸出，用到 short/swing 支撐與壓力
@@ -779,7 +779,7 @@ def adjust_scores_with_candles_filtered(result: dict,
     if not result or not patt or m is None:
         return result, "🕯️ K線形態：資料不足，未計分。"
 
-    # 取輸入的拷貝
+    # 複製 result
     res = {
         "short": dict(result.get("short", {})),
         "swing": dict(result.get("swing", {})),
@@ -801,10 +801,6 @@ def adjust_scores_with_candles_filtered(result: dict,
 
     # 位置過濾：靠近支撐 / 壓力（%）
     def _near_any(price: float, refs: list[float], side: str) -> float:
-        """
-        回傳『最近』的距離（百分比）；找不到就回 np.inf
-        side='support' 表示只考慮低於價格的支撐；side='resistance' 只考慮高於價格的壓力
-        """
         best = np.inf
         if refs:
             for v in refs:
@@ -812,12 +808,10 @@ def adjust_scores_with_candles_filtered(result: dict,
                     continue
                 if side == "support" and v < price:
                     gap = abs((price / v - 1.0) * 100.0)
-                    if gap < best:
-                        best = gap
+                    if gap < best: best = gap
                 if side == "resistance" and v > price:
                     gap = abs((v / price - 1.0) * 100.0)
-                    if gap < best:
-                        best = gap
+                    if gap < best: best = gap
         return best
 
     price = m.close if m.close is not None else np.nan
@@ -828,15 +822,15 @@ def adjust_scores_with_candles_filtered(result: dict,
     near_sup_ok = dist_support <= near_pct
     near_res_ok = dist_resist  <= near_pct
 
-    # 分類形態
+    # 形態分類
     last_tags = patt.get("last", [])
     bullish_tags = {"Bull_Marubozu", "Bull_Engulfing", "MorningStar", "Hammer/HS"}
     bearish_tags = {"Bear_Marubozu", "Bear_Engulfing", "EveningStar", "ShootingStar"}
     has_bull = any(t in bullish_tags for t in last_tags)
     has_bear = any(t in bearish_tags for t in last_tags)
-    has_doji = any(t == "Doji" for t in last_tags)   # 中性，不計分，只附註
+    has_doji = any(t == "Doji" for t in last_tags)   # 中性，不計分
 
-    # 計分：量能 + 位置都符合 → 比較大的加權；只符合其一 → 較小加權；都不符合 → 不加分
+    # 計分：量能 + 位置都符合 → 大加權；只符合其一 → 小加權；都不符合 → 不加分
     delta_s = delta_w = 0
 
     if has_bull:
@@ -889,6 +883,7 @@ def adjust_scores_with_candles_filtered(result: dict,
         msg.append("🕯️ 形態：無明顯訊號或資料不足。")
 
     return res, " ".join(msg)
+
 
 
 # =============================
@@ -1178,13 +1173,17 @@ except TypeError:
 
 # ===== K 線形態加權（中文名稱 + 解釋） =====
 patt = detect_candles(tech) if tech is not None else {}
-# 先算 levels（如果你還沒算）
+
+# 支撐/壓力（若前面已算過 levels 就不要重複）
 levels = estimate_levels(tech, m, poc_today, poc_60)
 
-# 再做「形態 + 量能/位置 過濾加權」
-result, candle_note = adjust_scores_with_candles_filtered(result, patt, m, levels,
-                                                          vol_ratio_need=1.0,  # 可調：1.0 或 1.2
-                                                          near_pct=2.0)        # 可調：2%
+# 形態 + 量能 + 位置 過濾加權（可調整門檻：量能 1.0、位置 2%）
+result, candle_note = adjust_scores_with_candles_filtered(
+    result, patt, m, levels,
+    vol_ratio_need=1.2,   # 放嚴格一點可改 1.2,寬鬆一點可改 1.2
+    near_pct=2.0          # 更短線可改 1.5；波段可改 3
+)
+
 
 # 顯示分數與決策
 c1, c2 = st.columns(2)
