@@ -992,20 +992,32 @@ with left:
 # 個人倉位
 with right:
     st.markdown("**個人倉位（可選）**")
-    avg_cost_str = st.text_input("平均成本價（每股）", value="")
-    lots_str = st.text_input("庫存張數（1張=1000股）", value="")
-    avg_cost = None
-    lots = None
+
+    # 讓輸入框與 session_state 綁定，清空時會跟著被清掉
+    avg_cost_str = st.text_input(
+        "平均成本價（每股）",
+        value=st.session_state.get("avg_cost_input", ""),
+        key="avg_cost_input",
+    )
+    lots_str = st.text_input(
+        "庫存張數（1張=1000股）",
+        value=st.session_state.get("lots_input", ""),
+        key="lots_input",
+    )
+
+# 統一的安全轉換
+def _to_float(s: str | None) -> Optional[float]:
+    if not s:
+        return None
     try:
-        if avg_cost_str.strip():
-            avg_cost = float(avg_cost_str.replace(",", ""))
-    except:
-        avg_cost = None
-    try:
-        if lots_str.strip():
-            lots = float(lots_str.replace(",", ""))
-    except:
-        lots = None
+        s = s.strip().replace(",", "")
+        return float(s) if s else None
+    except Exception:
+        return None
+
+avg_cost = _to_float(st.session_state.get("avg_cost_input"))
+lots     = _to_float(st.session_state.get("lots_input"))
+
 
 # 抓資料
 if fetch_now:
@@ -1135,29 +1147,8 @@ if "ATR14_pct" in tech.columns:
     if not _ap.empty:
         atr_pct = float(_ap.iloc[-1])
 
-# 使用右側輸入欄位
-avg_cost = None
-lots = None
-try:
-    avg_cost_str = st.session_state.get("avg_cost_input", "")
-    lots_str     = st.session_state.get("lots_input", "")
-except Exception:
-    avg_cost_str, lots_str = "", ""
-
-# 若你希望保留你上面「right 欄位」的 text_input，就用它們的變數
-# （這裡直接沿用你在 right 欄位建立的 avg_cost / lots）
-try:
-    # 右側欄位的字串已在上方轉 float 給 avg_cost / lots
-    pass
-except Exception:
-    pass
-
-# 如果上方 right 欄位的 avg_cost / lots 已經轉好了，就直接用
-if 'avg_cost' in locals() and avg_cost is not None and 'lots' in locals() and lots is not None:
-    pa = position_analysis(m, avg_cost, lots)
-else:
-    # 若沒有，就引導使用者輸入
-    pa = {}
+# 只有 avg_cost 與 lots 都是有效數值時，才建立持倉評估
+pa = position_analysis(m, avg_cost, lots) if (avg_cost and lots) else {}
 
 if pa:
     st.write(f"- 標的：**{code_display}**")
@@ -1174,7 +1165,7 @@ if pa:
     st.success(suggestion)
 else:
     st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
-# ↑↑↑ 請確保這行最後沒有多餘中文註解，否則會造成 SyntaxError
+
 
 
 
