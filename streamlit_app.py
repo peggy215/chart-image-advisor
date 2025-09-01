@@ -8,6 +8,21 @@ import numpy as np
 import yfinance as yf
 import streamlit as st
 
+# 🔤 K 線形態對照表（英文 → 中文）
+CANDLE_TRANSLATE = {
+    "Bull_Engulfing": "多頭吞噬",
+    "Bear_Engulfing": "空頭吞噬",
+    "MorningStar": "晨星",
+    "EveningStar": "暮星",
+    "Hammer": "錘子線",
+    "Inverted_Hammer": "倒錘子線",
+    "Doji": "十字星",
+    "ShootingStar": "射擊之星",
+    "Harami": "母子線",
+    "Three_White_Soldiers": "三白兵",
+    "Three_Black_Crows": "三隻黑鴉"
+    # 👆 需要可以再擴充
+}
 
 # =============================
 # 資料結構
@@ -1042,8 +1057,14 @@ if st.button("🚀 產生建議", type="primary", use_container_width=True):
              st.info(f"標的波段：{result['swing']['decision'][0]} — {result['swing']['decision'][1]}")
 
         # 顯示形態與影響說明
-        st.caption(f"🕯️ 最近形態：{', '.join(patt.get('last', [])) or '-'}")
+        # 將英文形態轉換成中文
+        last_patterns = patt.get("last", [])
+        translated = [CANDLE_TRANSLATE.get(p, p) for p in last_patterns]
+        st.caption(f"🕯️ 最近形態：{', '.join(translated) or '-'}")
+
+        # 顯示加權說明
         st.caption(candle_note)
+
 
         with st.expander("判斷依據 / 輸入數據"):
             st.write(result["notes"])
