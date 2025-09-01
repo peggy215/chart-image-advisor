@@ -1046,7 +1046,37 @@ st.subheader("🚀 產生建議")
 
 # 1) 技術分數（基礎）
 # 若前面已經有 result = analyze(...)，可刪除這行重算，直接沿用現有的 result
-result = analyze(m, poc_today=poc_today, poc_60=poc_60)
+# === 安全呼叫 analyze()（直接覆蓋你原本的 result = analyze(...) 那一行） ===
+
+# 1) 檢查 analyze 是否存在
+if 'analyze' not in globals():
+    st.error("analyze() 尚未定義或被移除，請確認上方函式區仍保留 analyze。")
+    st.stop()
+
+# 2) 檢查 m 是否存在
+if 'm' not in globals() and 'm' not in locals():
+    st.error("技術資料物件 m 尚未建立。請確認在此區塊前已建構 m（例如 build_metrics/compute_tech 產生的物件）。")
+    st.stop()
+
+# 3) 取得（或先行計算）POC 變數；若沒有就先給 None（analyze 需支援可選參數）
+_poc_today = globals().get('poc_today', locals().get('poc_today', None))
+_poc_60    = globals().get('poc_60',    locals().get('poc_60',    None))
+
+# 如果你還沒算過 60 日量價分布，可在這裡補一個近似計算（已有 tech 時）：
+if _poc_60 is None and 'tech' in globals():
+    try:
+        vp60 = volume_profile(tech, lookback=60, bins=24)
+        # 你的 volume_profile 回傳格式可能不同，以下兩種取法擇一
+        _poc_60 = vp60.get('poc') if isinstance(vp60, dict) else getattr(vp60, 'poc', None)
+    except Exception:
+        _poc_60 = None
+
+# 4) 安全呼叫 analyze：若簽名不接受 poc_* 參數，退回 analyze(m)
+try:
+    result = analyze(m, poc_today=_poc_today, poc_60=_poc_60)
+except TypeError:
+    # 你的 analyze 簽名可能是 analyze(m) 或 analyze(m, **kwargs) 不含 poc_*
+    result = analyze(m)
 
 # 2) 加入 K 線形態加權
 patt = detect_candles(tech) if tech is not None else {}
