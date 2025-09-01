@@ -1124,6 +1124,9 @@ except Exception:
 targets = build_targets(m, tech, poc_today, vp_full)
 wk      = build_targets_weekly(m, tech, poc_today)
 
+# ======================================================================
+# 目標價（自動）顯示區塊 —— 你應該已經算好 targets / wk 在上方
+# ======================================================================
 st.markdown("**短線目標**：{}".format(
     "-" if not targets.get("short_targets") else ", ".join([f"{x:.2f}" for x in targets["short_targets"]])
 ))
@@ -1137,17 +1140,67 @@ st.markdown("**中長距離（週線延伸）**：{}".format(
     "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
 ))
 
-# ===== 個人化持倉建議（把週線目標也帶入） =====
+# =========================  👇👇👇  在此行之後插入  👇👇👇  =========================
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 插入開始：支撐 / 壓力 <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+# === 🧭 支撐 / 壓力（短線 / 波段） ===
+# 依賴：estimate_levels(), tech, m, poc_today, poc_60
+st.subheader("🧭 支撐 / 壓力")
+
+try:
+    lv = estimate_levels(tech, m, poc_today, poc_60)
+except Exception as e:
+    lv = {}
+    st.warning(f"支撐/壓力計算失敗：{e}")
+
+def _mark_with_poc(values, poc_t=None, poc_60d=None, tol=0.3):
+    """把等於當日/60日 POC 的價位加註，提升可讀性。"""
+    out = []
+    for v in (values or []):
+        tag = ""
+        if poc_t is not None and abs(v - poc_t) <= tol:
+            tag = "（當日POC）"
+        elif poc_60d is not None and abs(v - poc_60d) <= tol:
+            tag = "（60日POC）"
+        out.append(f"{v:.2f}{tag}")
+    return "、".join(out) if out else "-"
+
+cA, cB = st.columns(2)
+with cA:
+    st.markdown("**短線（≈ 1–3 週）**")
+    st.markdown("• 支撐： " + _mark_with_poc(lv.get("short_supports"), poc_today, poc_60))
+    st.markdown("• 壓力： "  + _mark_with_poc(lv.get("short_resistances"), poc_today, poc_60))
+
+with cB:
+    st.markdown("**波段（≈ 1–3 個月）**")
+    st.markdown("• 支撐： " + _mark_with_poc(lv.get("swing_supports"), poc_today, poc_60))
+    st.markdown("• 壓力： "  + _mark_with_poc(lv.get("swing_resistances"), poc_today, poc_60))
+
+with st.expander("支撐/壓力計算說明"):
+    st.write("""
+- **短線**：就近的 MA5 / MA10（支撐）、MA20（壓力）＋『當日 POC』＋近 20 日高低點。
+- **波段**：MA20 / MA60（支撐）、MA60 / MA120（壓力）＋『60 日 POC』＋近 60 日高低點。
+- 旁註 **（當日POC）** 或 **（60日POC）** 代表該價位與 POC 重疊，成交密集、有效性更高。
+""")
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 插入結束：支撐 / 壓力 <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# =========================  👆👆👆  到這裡為止  👆👆👆  =========================
+
+
+# ======================================================================
+# 個人化持倉建議（依你輸入的成本/張數）—— 放在支撐/壓力之後
+# 依賴：position_analysis(), personalized_action(), result, targets, wk
+# ======================================================================
 st.subheader("👤 個人持倉評估（依你輸入的成本/張數）")
 
-# ATR%（給風控使用）
+# 取得 ATR%（給風控文字使用）
 atr_pct = None
-if "ATR14_pct" in tech.columns:
+if tech is not None and "ATR14_pct" in tech.columns:
     _ap = tech["ATR14_pct"].dropna()
     if not _ap.empty:
         atr_pct = float(_ap.iloc[-1])
 
-# 只有 avg_cost 與 lots 都是有效數值時，才建立持倉評估
+# 只有 avg_cost & lots 皆有效才做持倉建議
 pa = position_analysis(m, avg_cost, lots) if (avg_cost and lots) else {}
 
 if pa:
@@ -1160,11 +1213,12 @@ if pa:
         result["short"]["score"], result["swing"]["score"],
         m, pa, atr_pct,
         targets,
-        weekly_targets=wk
+        weekly_targets=wk  # 👈 把週線中長目標一起納入建議判斷
     )
     st.success(suggestion)
 else:
     st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
+
 
 
 
