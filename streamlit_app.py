@@ -767,18 +767,18 @@ def detect_candles(df: pd.DataFrame, lookback: int = 3) -> dict:
     levels: dict,
     *,
     vol_ratio_need: float = 1.2,   # 量能門檻：Vol / MV20 >= 1.2
-    near_pct: float = 2.0          # 位置門檻：距支撐/壓力 <= 2%
-) -> tuple[dict, str]:
-    """
-    形態加權（含過濾）：
-      - 量能過濾：Vol / MV20 >= vol_ratio_need 才具備參考價值
-      - 位置過濾：距最近支撐/壓力 <= near_pct% 才具備參考價值
-      - 加分幅度：
+    near_pct: float = 2.0          # 位置門檻：距支撐/壓力 <= 2% 
+    ) -> tuple[dict, str]:
+     """
+      形態加權（含過濾）：
+       - 量能過濾：Vol / MV20 >= vol_ratio_need 才具備參考價值
+       - 位置過濾：距最近支撐/壓力 <= near_pct% 才具備參考價值
+       - 加分幅度：
           * 量能 + 位置皆符合：短線 ±4、波段 ±3
           * 只符合其中一項：短線 ±2、波段 ±1
           * 都不符合：不加分（只顯示中性訊息）
-    輸出為使用者友善的精簡版文字。
-    """
+      輸出為使用者友善的精簡版文字。
+      """
     # 無資料/無形態 → 中性
     if not result or not patt:
         return result, "🕯️ 形態加權：中性（無明顯偏多/偏空形態）"
