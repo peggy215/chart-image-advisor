@@ -841,37 +841,34 @@ def pct_diff(a: float, b: float) -> float:
 def personalized_action(symbol: str,
                         short_score: int, swing_score: int,
                         m: Metrics, pa: Dict[str, float],
-                        atr_pct: Optional[float],
+                        atr_hint_pct: Optional[float],       # 👈 參數名改掉，避免衝突
                         targets: Dict,
                         weekly_targets: Optional[Dict] = None) -> str:
-    msg.append(risk_budget_hint(atr_pct))
-
     """
-    已整合『週線目標在 +8% 內 → 減碼少一點、續抱挑戰週線目標』：
-      - 逼近短線目標（±1%） → 依張數減碼
-      - 逼近波段目標（±1.5%） → 減碼 30–50%
-      - 若存在『週線中長目標』且距離當前價 <= +8%：
-          建議傾向『先小幅減碼（10–20% / 先賣1張），續抱挑戰週線目標』
+    個人化建議（已整合週線目標、停利拉高與風控說明）
+    - 逼近短線/波段目標 → 依張數減碼
+    - 若有週線中長目標且在 +8% 內 → 小幅減碼、續抱挑戰
     """
-    def pct_diff(a: float, b: float) -> float:
-        if a is None or b is None or b == 0: return np.inf
+    def _pct_diff(a: float, b: float) -> float:
+        if a is None or b is None or b == 0:
+            return np.inf
         return (a / b - 1.0) * 100.0
 
     lots = pa.get("lots", 0) if pa else 0
-    header = f"標的— "
-    close = m.close
+    header = f"標的：**{symbol}**。"
 
     if not pa:
-        return header + "未輸入成本/庫存：先依技術面執行。 " + risk_budget_hint(atr_pct)
+        return header + "未輸入成本/庫存：先依技術面執行。 " + risk_budget_hint(atr_hint_pct)
 
+    close = m.close
     ret = pa["ret_pct"]
     msg = [header]
 
-    # —— 日線目標距離 —— #
+    # —— 目標距離 —— #
     s_targets = targets.get("short_targets") or []
     w_targets = targets.get("swing_targets") or []
-    near_short = next((t for t in s_targets if abs(pct_diff(close, t)) <= 1.0), None)
-    near_swing = next((t for t in w_targets if abs(pct_diff(close, t)) <= 1.5), None)
+    near_short = next((t for t in s_targets if abs(_pct_diff(close, t)) <= 1.0), None)
+    near_swing = next((t for t in w_targets if abs(_pct_diff(close, t)) <= 1.5), None)
 
     # —— 週線目標（抓最近且在 +8% 內） —— #
     wk_list = (weekly_targets or {}).get("mid_targets_weekly") or []
@@ -880,11 +877,11 @@ def personalized_action(symbol: str,
         wk_above = [t for t in wk_list if t is not None and t > close]
         wk_above.sort(key=lambda t: t - close)
         for t in wk_above:
-            if pct_diff(t, close) <= 8.0:
+            if _pct_diff(t, close) <= 8.0:
                 wk_within = t
                 break
 
-    # —— 語句模板（依張數） —— #
+    # —— 依張數的文字模板 —— #
     def reduce_phrase(weight="20%"):
         if lots >= 3: return f"**分批減碼 {weight}**"
         if lots >= 2: return "**先賣 1 張**"
@@ -900,7 +897,7 @@ def personalized_action(symbol: str,
         if lots == 2: return "**回測支撐不破可小量加碼**"
         return "**先觀察支撐，必要時再加碼**"
 
-    # —— 淨損益敘述 —— #
+    # —— 淨損益情境 —— #
     if ret >= 15:
         msg.append(f"目前獲利約 {ret:.1f}%，遇壓力位建議 {reduce_phrase('20%–30%')}。")
     elif ret >= 8:
@@ -916,15 +913,18 @@ def personalized_action(symbol: str,
     else:
         msg.append(f"小幅虧損 {ret:.1f}%，依短線趨勢彈性調整，{add_phrase()}。")
 
-    # —— 目標價情境 —— #
+    # —— 目標價觸發 —— #
     if near_short is not None:
         if wk_within is not None and short_score >= 65 and swing_score >= 65:
-            msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，且週線目標 **{wk_within:.2f}** 在 +8% 內。建議{small_reduce_phrase()}，續抱觀察量能挑戰週線目標。")
+            msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，且週線目標 **{wk_within:.2f}** 在 +8% 內。"
+                       f"建議{small_reduce_phrase()}，續抱觀察量能挑戰週線目標。")
         else:
-            msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，建議 {reduce_phrase()}，停利拉高至 **前一日低點/MA5**。")
+            msg.append(f"**已逼近短線目標 {near_short:.2f}（±1%）**，建議 {reduce_phrase()}，"
+                       f"停利拉高至 **前一日低點 / MA5**。")
     elif near_swing is not None:
         if wk_within is not None and swing_score >= 65:
-            msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，但週線目標 **{wk_within:.2f}** 在 +8% 內，可先{small_reduce_phrase()}；若量價健康再續抱挑戰。")
+            msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，但週線目標 **{wk_within:.2f}** 在 +8% 內，"
+                       f"可先{small_reduce_phrase()}；若量價健康再續抱挑戰。")
         else:
             msg.append(f"**已逼近波段目標 {near_swing:.2f}（±1.5%）**，建議 {reduce_phrase('30%–50%')}，其餘視量能續抱。")
     else:
@@ -938,8 +938,14 @@ def personalized_action(symbol: str,
         else:
             msg.append("技術面：訊號分歧，採**分批操作**並嚴守支撐/停損。")
 
-    msg.append(risk_budget_hint(atr_pct))
-    return " ".join(msg)
+    # 風控提示 + 說明
+    msg.append(risk_budget_hint(atr_hint_pct))
+    msg.append("📘 說明：")
+    msg.append("・**停利拉高**：若股價上漲，建議將停利線上移，例如以『前一日低點』或『MA5』作為防守位，確保已獲利不被回吐。")
+    msg.append("・**風控比例**：ATR 反映波動度，例如 ATR≈2.9% 屬於中等波動，建議單筆交易風險控制在總資金的 **1%–1.5%**。")
+
+    return ' '.join(msg)
+
 
 
 
