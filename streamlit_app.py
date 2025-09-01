@@ -8,21 +8,19 @@ import numpy as np
 import yfinance as yf
 import streamlit as st
 
-# 🔤 K 線形態對照表（英文 → 中文）
+# 🔤 K 線形態對照表（英文 → 中文 + 解釋）
 CANDLE_TRANSLATE = {
-    "Bull_Engulfing": "多頭吞噬",
-    "Bear_Engulfing": "空頭吞噬",
-    "MorningStar": "晨星",
-    "EveningStar": "暮星",
-    "Hammer": "錘子線",
-    "Inverted_Hammer": "倒錘子線",
-    "Doji": "十字星",
-    "ShootingStar": "射擊之星",
-    "Harami": "母子線",
-    "Three_White_Soldiers": "三白兵",
-    "Three_Black_Crows": "三隻黑鴉"
-    # 👆 需要可以再擴充
+    "Bull_Engulfing": ("多頭吞噬", "紅棒完全包住前一天綠棒，代表買盤強勁，常見於反轉起漲點"),
+    "Bear_Engulfing": ("空頭吞噬", "綠棒完全包住前一天紅棒，代表賣壓沉重，常見於反轉下跌點"),
+    "MorningStar": ("晨星", "三根 K 線組合，常見底部反轉，意味買盤介入"),
+    "EveningStar": ("暮星", "三根 K 線組合，常見高檔反轉，意味賣壓出現"),
+    "Hammer/HS": ("錘子線/上吊線", "下影線很長，若在低檔 → 止跌；若在高檔 → 轉弱"),
+    "ShootingStar": ("射擊之星", "上影線很長，出現在高檔時常見反轉向下"),
+    "Doji": ("十字星", "開盤與收盤接近，代表多空僵持，需看前後 K 棒決定方向"),
+    "Bull_Marubozu": ("大陽棒", "實體很長幾乎沒影線，代表買方強勢"),
+    "Bear_Marubozu": ("大陰棒", "實體很長幾乎沒影線，代表賣方強勢")
 }
+
 
 # =============================
 # 資料結構
