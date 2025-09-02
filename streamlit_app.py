@@ -1347,6 +1347,17 @@ def compute_trend_state(tech: pd.DataFrame, m: Metrics, vp60: dict | None = None
     # 其它：視為一般震盪
     return {"state": "range_neutral", "facts": {"ATR%": atr_pct, "BB寬%": bb_width, "量能比": (vol / mv20) if (vol and mv20) else None}}
 
+def check_volume_breakout(m: Metrics) -> Optional[str]:
+    """
+    偵測「價漲 + 放量」情境。
+    - 條件：收盤價 > 前一日收盤價，且 Volume > MV20
+    """
+    if m.close is None or m.volume is None or m.MV20 is None:
+        return None
+    if m.volume > m.MV20 and m.chg_pct is not None and m.chg_pct > 0:
+        return "✅ 脫離盤整 → 偏多（價漲 + 放量）"
+    return None
+
 def trend_action_text(ts: dict) -> tuple[str, str]:
     """依 state 回傳 (燈號文字, 行動建議)"""
     s = ts.get("state", "unknown")
@@ -1419,6 +1430,7 @@ with st.expander("支撐/壓力計算說明"):
 
 # ===== 趨勢燈號（狀態 + 行動） ==============================================
 st.subheader("🚦 趨勢燈號（狀態與建議）")
+
 vp60_for_trend = volume_profile(tech, lookback=60, bins=24) or {}
 ts = compute_trend_state(tech, m, vp60_for_trend)
 label, act = trend_action_text(ts)
@@ -1433,6 +1445,19 @@ with st.expander("判斷依據（重點數據）"):
     facts = ts.get("facts", {})
     nice = {k: (None if v is None else (f"{v:.2f}" if isinstance(v, (int,float)) else v)) for k,v in facts.items()}
     st.json(nice)
+
+# 👉 額外檢查「價漲 + 放量」
+def check_volume_breakout(m: Metrics) -> Optional[str]:
+    if m.close is None or m.volume is None or m.MV20 is None:
+        return None
+    if m.volume > m.MV20 and m.chg_pct is not None and m.chg_pct > 0:
+        return "✅ 脫離盤整 → 偏多（價漲 + 放量）"
+    return None
+
+extra_signal = check_volume_breakout(m)
+if extra_signal:
+    st.success(extra_signal + " 👉 可小量試單，突破確認後再加碼")
+
 
 
 
