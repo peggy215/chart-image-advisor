@@ -1587,6 +1587,138 @@ try:
 except Exception as e:
     st.error(f"當沖建議計算失敗：{e}")
 
+# =============================
+# 💡 當沖建議（分時 VWAP / 當日 POC）
+# =============================
+
+def _intraday_vwap(df: pd.DataFrame) -> float | None:
+    """以分時資料計算 VWAP：sum(price*vol)/sum(vol)。用 Close 近似 price。"""
+    if df is None or df.empty:
+        return None
+    v = df["Volume"].fillna(0)
+    if float(v.sum()) <= 0:
+        return None
+    p = df["Close"].fillna(method="ffill")
+    return float((p * v).sum() / v.sum())
+
+def _fmt(p):
+    return "-" if p is None or not np.isfinite(p) else f"{p:.2f}"
+
+def daytrade_suggestion_auto(symbol: str) -> tuple[str, dict]:
+    """
+    自動抓 5 分鐘分時資料，產出當沖建議（做多視角；若市價落在 VWAP 下方則建議觀望或等反彈再說）
+    回傳：(建議文字, 參考數據)
+    """
+    try:
+        intraday = yf.download(symbol, period="7d", interval="5m", progress=False)
+        if intraday is None or intraday.empty:
+            return "❓ 無法計算當沖建議（抓不到分時資料）", {}
+
+        # 只取「今天」
+        tz = "Asia/Taipei"
+        idx = intraday.index
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize("UTC")
+        intraday = intraday.copy()
+        intraday.index = idx.tz_convert(tz)
+        today = pd.Timestamp.now(tz).normalize()
+        dft = intraday[(intraday.index >= today) & (intraday.index < today + pd.Timedelta(days=1))]
+        if dft.empty:
+            return "❓ 無法計算當沖建議（今日尚無分時資料）", {}
+
+        last = dft.iloc[-1]
+        close = float(last["Close"])
+        day_high = float(dft["High"].max())
+        day_low  = float(dft["Low"].min())
+
+        vwap_today = _intraday_vwap(dft)
+        poc_intraday = session_poc_from_intraday(symbol)  # 你前面已定義
+        ref = vwap_today if vwap_today is not None else poc_intraday
+
+        if ref is None:
+            return "❓ 無法計算當沖建議（VWAP/POC 皆無法取得）", {}
+
+        # 基本參考價位
+        entry = ref                                     # 以 VWAP/POC 當進場基準
+        stop  = max(day_low, entry * 0.99)             # -1% 或日內低點
+        target = min(day_high, entry * 1.01)           # +1% 或日內前高
+
+        # 價位相對 VWAP 的狀態
+        diff_pct = (close / ref - 1.0) * 100.0
+
+        # 規則分支（做多視角）
+        # 1) 市價遠高於 VWAP（> +0.6%）：傾向追高風險，等回檔靠近 VWAP 再說
+        if diff_pct >= 0.6:
+            text = (
+                f"🎯 當沖建議（偏強；避免追高）：\n"
+                f"- **當前價**：{close:.2f}（高於 VWAP/POC {diff_pct:.2f}%）\n"
+                f"- **計畫買點**：{entry:.2f}（VWAP/POC 回檔靠近再考慮）\n"
+                f"- **停損**：{stop:.2f}（跌破支撐止損）\n"
+                f"- **出場**：{target:.2f}（前高或 +1%）\n"
+                f"📌 說明：走勢偏強，但**不建議追價**；等回測 VWAP/POC 附近、量縮不破再低風險切入。"
+            )
+        # 2) 市價略高於 VWAP（0 ~ +0.6%）：順勢偏多，拉回靠近 VWAP 小試
+        elif 0.0 < diff_pct < 0.6:
+            buy_zone_low  = entry * 0.998   # -0.2%
+            buy_zone_high = entry * 1.001   # +0.1%
+            text = (
+                f"🎯 當沖建議（順勢偏多）：\n"
+                f"- **當前價**：{close:.2f}（略高於 VWAP/POC {diff_pct:.2f}%）\n"
+                f"- **進場區**：{buy_zone_low:.2f} ~ {buy_zone_high:.2f}（VWAP 附近回檔小試）\n"
+                f"- **停損**：{stop:.2f}（跌破 VWAP/POC 或日內低點）\n"
+                f"- **出場**：{target:.2f}（前高或 +1%）\n"
+                f"📌 說明：以 VWAP 為支撐的順勢交易；若回測失敗跌破，立即認錯退出。"
+            )
+        # 3) 市價貼近 VWAP（-0.3% ~ 0%）：盤整邊緣，等突破或回測成功再進
+        elif -0.3 <= diff_pct <= 0.0:
+            text = (
+                f"🎯 當沖建議（中性盤整）：\n"
+                f"- **當前價**：{close:.2f}（貼近 VWAP/POC {diff_pct:.2f}%）\n"
+                f"- **計畫買點**：{entry:.2f}（等『回測不破』或量價突破再進）\n"
+                f"- **停損**：{stop:.2f}\n"
+                f"- **出場**：{target:.2f}\n"
+                f"📌 說明：VWAP 附近容易震盪洗單；**要等確認**（如回測不破、放量紅K）再進場。"
+            )
+        # 4) 市價低於 VWAP（< -0.3%）：偏空，不建議做多；若要多，需等站回 VWAP
+        else:  # diff_pct < -0.3
+            text = (
+                f"🎯 當沖建議（偏空／觀望）：\n"
+                f"- **當前價**：{close:.2f}（低於 VWAP/POC {abs(diff_pct):.2f}%）\n"
+                f"- **多單進場**：不建議（籌碼在空方）。若強要做多，請等**站回 VWAP**再說。\n"
+                f"- **空方思路**（進階）：反彈至 VWAP 附近、量縮轉弱再尋找做空點；嚴控風險。\n"
+                f"📌 說明：市價位於 VWAP 下方表示當日偏弱；**多單勝率低**，建議先觀望。"
+            )
+
+        info = {
+            "price": close,
+            "vwap": vwap_today,
+            "poc_intraday": poc_intraday,
+            "day_high": day_high,
+            "day_low": day_low,
+            "diff_vs_vwap_%": diff_pct,
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+        }
+        return text, info
+
+    except Exception as e:
+        return f"❌ 當沖建議計算失敗：{e}", {}
+
+# === 畫面顯示（放在『🧭 支撐 / 壓力』之後、『👤 個人持倉評估』之前） ===
+st.subheader("💡 當沖建議（僅供參考）")
+try:
+    code_for_intraday = st.session_state.get("symbol_final", symbol)
+    txt, facts = daytrade_suggestion_auto(code_for_intraday)
+    st.info(txt)
+    with st.expander("當日關鍵數據（VWAP / POC / 高低點）"):
+        if facts:
+            show = {k: (None if v is None else (f"{v:.2f}" if isinstance(v,(int,float)) else v)) for k,v in facts.items()}
+            st.json(show)
+        else:
+            st.write("（無可用數據）")
+except Exception as e:
+    st.error(f"當沖模組出錯：{e}")
 
 
 # ======================================================================
