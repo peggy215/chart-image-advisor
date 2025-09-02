@@ -1936,7 +1936,8 @@ def daytrade_suggestion_auto(symbol: str) -> tuple[str, dict]:
 # === 畫面顯示（放在『🧭 支撐 / 壓力』之後、『👤 個人持倉評估』之前） ===
 # 只呼叫一次的當沖建議（合併順勢/區間邏輯）
 vp_full = volume_profile(tech, lookback=60, bins=24) or {}
-render_intraday_plan_once(m, tech, poc_today, vp_full, code_display)
+
+render_intraday_advice_once(tech, m, poc_today, vp_full, code_display)
 
 
 
