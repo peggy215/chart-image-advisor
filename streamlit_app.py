@@ -1561,6 +1561,71 @@ def compute_trend_state(tech: pd.DataFrame, m: Metrics, vp60: dict | None = None
     # 其它：視為一般震盪
     return {"state": "range_neutral", "facts": {"ATR%": atr_pct, "BB寬%": bb_width, "量能比": (vol / mv20) if (vol and mv20) else None}}
 
+def render_intraday_plan_once(m, tech, poc_today, vp60, code_display):
+    """只渲染一次的當沖建議：依趨勢自動選擇『順勢』或『區間』邏輯。"""
+    # 防呆 & 防重
+    if m is None or tech is None or tech.empty:
+        return
+    if st.session_state.get("_intraday_rendered"):
+        return
+
+    vwap = m.vwap_approx
+    poc  = poc_today or (vp60.get("POC") if isinstance(vp60, dict) else None)
+    ref  = vwap or poc
+    px   = m.close
+
+    if ref is None or px is None:
+        return
+
+    # 簡單趨勢判斷：可換成你已經有的 compute_trend_state(...)
+    trend_up   = (m.MA20 is not None and m.MA60 is not None and m.MA20 > m.MA60)
+    trend_flat = (m.MA20 is not None and m.MA60 is not None and abs((m.MA20/m.MA60) - 1) < 0.01)
+    dist = (px/ref - 1) * 100.0
+
+    # 目標/停損模板
+    prev_high = float(tech["High"].iloc[-1])
+    entry, stop, target, note = None, None, None, ""
+
+    if trend_up and px >= ref:
+        # 順勢：靠近 VWAP/POC 回測不破試多
+        entry  = max(ref * 0.999, ref * 1.000)     # 近似 ref±0.1%
+        stop   = ref * 0.997                       # 約 -0.3%（你可調）
+        target = max(prev_high, ref * 1.010)       # 前高或 +1%
+        note   = "順勢：以 VWAP/POC 為支撐，回測不破試多；破線立即認錯退出。"
+    elif trend_flat and abs(dist) <= 0.3:
+        # 區間：貼近 VWAP/POC 作均值回歸
+        entry  = ref
+        stop   = ref * 0.996                       # 約 -0.4%
+        target = max(prev_high, ref * 1.008)       # 前高或 +0.8%
+        note   = "區間：靠近 VWAP/POC 進場，守停損；遇前高或 +0.8% 分批了結。"
+    else:
+        # 乖離太大或趨勢向下：不追
+        if dist > 0.6:
+            st.subheader("💡 當沖建議（僅供參考）")
+            st.info(f"現價已高於 VWAP/POC 約 {dist:.2f}%，不建議追價；等待回落至 VWAP±0.1% 附近再評估。")
+        else:
+            st.subheader("💡 當沖建議（僅供參考）")
+            st.info("趨勢偏弱或條件不足，當沖不建議進場；以觀望為主。")
+        st.session_state["_intraday_rendered"] = True
+        return
+
+    # 輸出卡片（只顯示一次）
+    st.subheader("💡 當沖建議（僅供參考）")
+    st.markdown(
+        f"""
+- 🎯 **當前價**：{px:.2f}（與 VWAP/POC 乖離約 {dist:.2f}%）
+- 🎯 **進場價**：{entry:.2f}（VWAP/POC 附近）
+- 🛡️ **停損價**：{stop:.2f}（跌破支撐即止損）
+- 🎯 **出場價**：{target:.2f}（前高或 VWAP+目標幅度）
+- 📌 **說明**：{note}
+        """
+    )
+    st.caption("註：當沖為高風險操作，請嚴守停損，勿追高。")
+    st.session_state["_intraday_rendered"] = True
+
+
+
+
 def check_volume_breakout(m: Metrics) -> Optional[str]:
     """
     偵測「價漲 + 放量」情境。
@@ -1748,19 +1813,7 @@ def daytrade_suggestion(df_intraday: pd.DataFrame, vwap: float, poc: float) -> s
         f"📌 說明：靠近 VWAP 或 POC 買進，守停損，逢壓力或 +1% 獲利出場。"
     )
 
-# === 在畫面中顯示 ===
-st.subheader("💡 當沖建議（僅供參考）")
-try:
-    intraday = yf.download(code_display, period="7d", interval="5m", progress=False)
-    if intraday is not None and not intraday.empty:
-        poc_intraday = session_poc_from_intraday(code_display)
-        vwap_today = float(intraday["Close"].mean())  # 近似 VWAP
-        suggestion = daytrade_suggestion(intraday, vwap_today, poc_intraday)
-        st.info(suggestion)
-    else:
-        st.warning("抓不到分時資料，無法提供當沖建議。")
-except Exception as e:
-    st.error(f"當沖建議計算失敗：{e}")
+
 
 # =============================
 # 💡 當沖建議（分時 VWAP / 當日 POC）
@@ -1881,19 +1934,10 @@ def daytrade_suggestion_auto(symbol: str) -> tuple[str, dict]:
         return f"❌ 當沖建議計算失敗：{e}", {}
 
 # === 畫面顯示（放在『🧭 支撐 / 壓力』之後、『👤 個人持倉評估』之前） ===
-st.subheader("💡 當沖建議（僅供參考）")
-try:
-    code_for_intraday = st.session_state.get("symbol_final", symbol)
-    txt, facts = daytrade_suggestion_auto(code_for_intraday)
-    st.info(txt)
-    with st.expander("當日關鍵數據（VWAP / POC / 高低點）"):
-        if facts:
-            show = {k: (None if v is None else (f"{v:.2f}" if isinstance(v,(int,float)) else v)) for k,v in facts.items()}
-            st.json(show)
-        else:
-            st.write("（無可用數據）")
-except Exception as e:
-    st.error(f"當沖模組出錯：{e}")
+# 只呼叫一次的當沖建議（合併順勢/區間邏輯）
+vp_full = volume_profile(tech, lookback=60, bins=24) or {}
+render_intraday_plan_once(m, tech, poc_today, vp_full, code_display)
+
 
 
 # ======================================================================
