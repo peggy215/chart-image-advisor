@@ -1207,7 +1207,7 @@ for name, desc in translated:
         st.caption(f"🕯️ 最近形態：{name} — {desc}")
     else:
         st.caption(f"🕯️ 最近形態：{name}")
-st.caption(candle_note)
+
 
 with st.expander("判斷依據 / 輸入數據"):
     st.write(result["notes"])
