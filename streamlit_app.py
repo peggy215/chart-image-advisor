@@ -1238,7 +1238,141 @@ st.markdown("**中長距離（週線延伸）**：{}".format(
     "-" if not wk.get("mid_targets_weekly") else ", ".join([f"{x:.2f}" for x in wk["mid_targets_weekly"]])
 ))
 
-# =========================  👇👇👇  在此行之後插入  👇👇👇  =========================
+# ===== 趨勢燈號（狀態判斷 + 行動建議）========================================
+def _s(val, default=None):
+    try:
+        return float(val) if val is not None else default
+    except Exception:
+        return default
+
+def compute_trend_state(tech: pd.DataFrame, m: Metrics, vp60: dict | None = None) -> dict:
+    """
+    回傳：
+      state: one of ["range_neutral","range_up","range_down","range_end",
+                    "down_trend","baseing","turning_up",
+                    "up_trend","up_warning","turning_down"]
+      facts: 指標摘要（給說明用）
+    """
+    if tech is None or tech.empty:
+        return {"state": "unknown", "facts": {}}
+
+    close   = _s(m.close)
+    ma5     = _s(m.MA5);   ma10 = _s(m.MA10); ma20 = _s(m.MA20)
+    ma60    = _s(m.MA60);  dif  = _s(m.DIF);  macd = _s(m.MACD)
+    rsi     = _s(m.RSI14); vol  = _s(m.volume); mv20 = _s(m.MV20)
+    bb_up   = _s(m.BB_UP); bb_mid = _s(m.BB_MID); bb_low = _s(m.BB_LOW)
+
+    # 波動（ATR%）與布林寬度
+    atr_pct = None
+    if "ATR14_pct" in tech.columns:
+        s = tech["ATR14_pct"].dropna()
+        if not s.empty: atr_pct = float(s.iloc[-1])
+    bb_width = None
+    if bb_up and bb_low and close:
+        bb_width = (bb_up - bb_low) / close * 100.0
+
+    # 量價/價值區
+    vp60 = vp60 or {}
+    poc60 = vp60.get("POC")
+
+    # 條件
+    ma_knit = all(x is not None for x in [ma5, ma10, ma20]) and max(ma5, ma10, ma20) - min(ma5, ma10, ma20) <= (close * 0.01)  # 均線糾結 ~1%
+    bb_tight = (bb_width is not None) and (bb_width <= 5.0)   # 布林很窄
+    low_vol  = (vol is not None and mv20 is not None and mv20 > 0 and (vol / mv20) < 0.9)
+    up_vol   = (vol is not None and mv20 is not None and mv20 > 0 and (vol / mv20) >= 1.2)
+
+    up_bias   = (close is not None and ma20 is not None and close > ma20) and (dif is not None and macd is not None and dif > macd) and (rsi is not None and rsi >= 50)
+    down_bias = (close is not None and ma20 is not None and close < ma20) and (dif is not None and macd is not None and dif < macd) and (rsi is not None and rsi <= 45)
+
+    # 趨勢框架
+    up_trend   = (ma20 is not None and ma60 is not None and ma20 > ma60) and (rsi is not None and rsi >= 55)
+    down_trend = (ma20 is not None and ma60 is not None and ma20 < ma60) and (rsi is not None and rsi <= 50)
+
+    # 盤整（均線糾結 + 布林收斂）
+    if ma_knit and bb_tight:
+        if atr_pct is not None and atr_pct <= 2.0 and low_vol:
+            state = "range_end"          # 尾聲：隨時出方向
+        elif up_bias:
+            state = "range_up"           # 盤整偏上
+        elif down_bias:
+            state = "range_down"         # 盤整偏下
+        else:
+            state = "range_neutral"      # 標準盤整
+        return {"state": state, "facts": {
+            "ATR%": atr_pct, "BB寬%": bb_width, "量能比": (vol / mv20) if (vol and mv20) else None,
+            "RSI14": rsi, "DIF>MACD": bool(dif is not None and macd is not None and dif > macd),
+            "close>MA20": bool(close and ma20 and close > ma20), "POC60": poc60
+        }}
+
+    # 下跌趨勢族群
+    if down_trend:
+        # 築底：指標正背離 或 連續站回MA20
+        pos_div = False
+        try:
+            c = tech["Close"].tail(30)
+            d = (ema(c, 12) - ema(c, 26)).tail(30)  # 簡化用 DIF 當動能
+            pos_div = (c.idxmin() < c.index[-1]) and (d.iloc[-1] > d.min()*0.9)  # 粗略：價創新低後動能未再破底
+        except Exception:
+            pass
+        stand_ma20 = bool(close and ma20 and close > ma20)
+        if pos_div or stand_ma20:
+            return {"state": "baseing", "facts": {"RSI14": rsi, "站回MA20": stand_ma20, "正背離?": pos_div, "POC60": poc60}}
+        # 轉強：站上MA60、MA20上穿MA60
+        cross_up = bool(ma20 and ma60 and ma20 > ma60 and (tech["MA20"].iloc[-2] <= tech["MA60"].iloc[-2]))
+        if (close and ma60 and close > ma60) or cross_up:
+            return {"state": "turning_up", "facts": {"RSI14": rsi, "站上MA60?": bool(close and ma60 and close > ma60), "MA20上穿MA60?": cross_up}}
+        return {"state": "down_trend", "facts": {"RSI14": rsi, "close<POC60": bool(poc60 and close and close < poc60)}}
+
+    # 上升趨勢族群
+    if up_trend:
+        warn = False
+        # 警訊：跌破MA20、頂背離、上漲縮量/回檔放量
+        below_ma20 = bool(close and ma20 and close < ma20)
+        top_div = False
+        try:
+            c = tech["Close"].tail(40); r = rsi if rsi is not None else 50
+            top_div = (c.iloc[-1] >= c.max()*0.995) and (r <= 55)  # 近新高但 RSI 不強
+        except Exception:
+            pass
+        if below_ma20 or top_div:
+            warn = True
+        if warn:
+            return {"state": "up_warning", "facts": {"跌破MA20?": below_ma20, "頂背離?": top_div, "量能比": (vol / mv20) if (vol and mv20) else None}}
+        # 轉跌：MA20下彎且跌破MA60
+        turn_down = bool(ma20 and ma60 and ma20 < ma60)
+        if (close and ma60 and close < ma60) and turn_down:
+            return {"state": "turning_down", "facts": {"MA20<MA60?": turn_down}}
+        return {"state": "up_trend", "facts": {"RSI14": rsi, "close>POC60": bool(poc60 and close and close > poc60)}}
+
+    # 其它：視為一般震盪
+    return {"state": "range_neutral", "facts": {"ATR%": atr_pct, "BB寬%": bb_width, "量能比": (vol / mv20) if (vol and mv20) else None}}
+
+def trend_action_text(ts: dict) -> tuple[str, str]:
+    """依 state 回傳 (燈號文字, 行動建議)"""
+    s = ts.get("state", "unknown")
+    f = ts.get("facts", {})
+    if s == "range_end":
+        return "盤整（尾聲）", "等『放量 + 布林擴張』再跟；可先小倉佈局，突破確立再加碼，停損放箱底/MA20。"
+    if s == "range_up":
+        return "盤整（偏上）", "分批佈局；突破箱頂且量能≥1.5×MV20時加碼，防守 MA20 / 箱底。"
+    if s == "range_down":
+        return "盤整（偏下）", "保守或減碼；跌破箱底且放量時出清弱勢，僅留守 MA60 或具題材標的。"
+    if s == "range_neutral":
+        return "盤整（中性）", "等待方向，觀察 POC/箱頂箱底；僅做區間短打，嚴守停損。"
+    if s == "down_trend":
+        return "下跌趨勢", "以反彈減碼為主；除非看到明確築底訊號（站回MA20/正背離/放量）再考慮低接。"
+    if s == "baseing":
+        return "下跌→築底", "先觀察，站穩 MA20 與量能回升再小量佈局；分批進場，停損設近期低點下。"
+    if s == "turning_up":
+        return "下跌→轉強", "站回 MA60 或 MA20黃金交叉後可偏多；守 MA20/POC，目標看前高或波段目標。"
+    if s == "up_trend":
+        return "上升趨勢", "順勢操作、拉回偏多；守 MA20/前低，量能健康可追蹤加碼點。"
+    if s == "up_warning":
+        return "上升→警訊", "先減碼 20–30%，停利拉高至 MA5/前低；若 2–3 日內無法收復 MA20，續降風險。"
+    if s == "turning_down":
+        return "上升→翻轉下跌", "逢反彈大幅減碼或出清，先保留現金；等下一次築底/轉強再進。"
+    return "未知", "資料不足，請先抓取行情或縮小區間再試。"
+
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 插入開始：支撐 / 壓力 <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # === 🧭 支撐 / 壓力（短線 / 波段） ===
@@ -1282,7 +1416,24 @@ with st.expander("支撐/壓力計算說明"):
 """)
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 插入結束：支撐 / 壓力 <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-# =========================  👆👆👆  到這裡為止  👆👆👆  =========================
+
+# ===== 趨勢燈號（狀態 + 行動） ==============================================
+st.subheader("🚦 趨勢燈號（狀態與建議）")
+vp60_for_trend = volume_profile(tech, lookback=60, bins=24) or {}
+ts = compute_trend_state(tech, m, vp60_for_trend)
+label, act = trend_action_text(ts)
+
+colA, colB = st.columns([1,2])
+with colA:
+    st.metric("狀態", label)
+with colB:
+    st.write("**行動建議**：", act)
+
+with st.expander("判斷依據（重點數據）"):
+    facts = ts.get("facts", {})
+    nice = {k: (None if v is None else (f"{v:.2f}" if isinstance(v, (int,float)) else v)) for k,v in facts.items()}
+    st.json(nice)
+
 
 
 # ======================================================================
