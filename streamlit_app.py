@@ -1543,6 +1543,51 @@ st.info(advice_text)
 st.caption(check_stand_ma(m, tech, "MA20"))
 st.caption(check_stand_ma(m, tech, "MA60"))
 
+# =============================
+# 💡 當沖建議
+# =============================
+def daytrade_suggestion(df_intraday: pd.DataFrame, vwap: float, poc: float) -> str:
+    """
+    簡單的當沖建議：
+    - 進場：靠近 VWAP 或 POC 附近，且量能放大
+    - 出場：日內壓力（前高 ±0.5%）
+    - 停損：跌破 VWAP 或當日低點
+    """
+    if df_intraday is None or df_intraday.empty:
+        return "❓ 無法計算當沖建議（缺少分時資料）"
+
+    last = df_intraday.iloc[-1]
+    close = float(last["Close"])
+    high = float(df_intraday["High"].max())
+    low  = float(df_intraday["Low"].min())
+
+    entry = vwap if vwap else poc
+    stop  = max(low, entry * 0.99)       # 停損：低點或 VWAP-1%
+    target = min(high, entry * 1.01)     # 出場：高點或 VWAP+1%
+
+    return (
+        f"🎯 當沖建議：\n"
+        f"- **進場價**：{entry:.2f}（VWAP/POC）\n"
+        f"- **停損價**：{stop:.2f}（跌破支撐止損）\n"
+        f"- **出場價**：{target:.2f}（前高或 VWAP+1%）\n"
+        f"📌 說明：靠近 VWAP 或 POC 買進，守停損，逢壓力或 +1% 獲利出場。"
+    )
+
+# === 在畫面中顯示 ===
+st.subheader("💡 當沖建議（僅供參考）")
+try:
+    intraday = yf.download(code_display, period="7d", interval="5m", progress=False)
+    if intraday is not None and not intraday.empty:
+        poc_intraday = session_poc_from_intraday(code_display)
+        vwap_today = float(intraday["Close"].mean())  # 近似 VWAP
+        suggestion = daytrade_suggestion(intraday, vwap_today, poc_intraday)
+        st.info(suggestion)
+    else:
+        st.warning("抓不到分時資料，無法提供當沖建議。")
+except Exception as e:
+    st.error(f"當沖建議計算失敗：{e}")
+
+
 
 # ======================================================================
 # 個人化持倉建議（依你輸入的成本/張數）—— 放在支撐/壓力之後
