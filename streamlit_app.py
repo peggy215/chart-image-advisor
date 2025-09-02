@@ -1458,6 +1458,47 @@ extra_signal = check_volume_breakout(m)
 if extra_signal:
     st.success(extra_signal + " 👉 可小量試單，突破確認後再加碼")
 
+# === 🛠️ 實務操作建議 ===
+st.subheader("🛠️ 實務操作建議")
+
+def practical_advice(m: Metrics, result: dict, lv: dict) -> str:
+    """
+    根據技術面 & 均線位置，給出持有 / 空手 / 風控建議
+    """
+    msg = []
+    close = m.close or 0.0
+    ma20, ma60, ma5 = m.MA20, m.MA60, m.MA5
+    res_short = result.get("short", {}).get("decision", ["",""])[0]
+    res_swing = result.get("swing", {}).get("decision", ["",""])[0]
+
+    # ===== 已持有 =====
+    hold_msg = "若已持有："
+    if close > (ma20 or 0) and close > (ma60 or 0):
+        hold_msg += "續抱，觀察能否站穩 MA20 / MA60，突破後可續抱挑戰波段壓力。"
+    else:
+        hold_msg += "守住 MA5 / MA10，若跌破需減碼或停損。"
+    msg.append(hold_msg)
+
+    # ===== 空手 =====
+    empty_msg = "若空手："
+    if res_short.startswith("BUY") or res_swing.startswith("BUY"):
+        empty_msg += "可小量切入，設好停損（如回跌到 5 日均線或當日低點）。"
+    else:
+        empty_msg += "先觀望，等突破壓力或明確轉強再進場。"
+    msg.append(empty_msg)
+
+    # ===== 風險控管 =====
+    risk_msg = "風險控管："
+    if res_short.startswith("BUY") and res_swing.startswith("BUY"):
+        risk_msg += "剛轉強，失敗機率仍有 → 建議先小倉位，避免過度槓桿。"
+    else:
+        risk_msg += "以支撐位為防守線，單筆風險控制在總資金 1%–2%。"
+    msg.append(risk_msg)
+
+    return "\n\n".join(msg)
+
+advice_text = practical_advice(m, result, lv)
+st.info(advice_text)
 
 
 
