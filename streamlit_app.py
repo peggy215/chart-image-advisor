@@ -372,6 +372,45 @@ def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
 
     return f"{s}：{gap_pct:.2f}%（{strength}）{extra}"
 
+# =============================
+# 均線站穩檢查
+# =============================
+def check_stand_ma(m: Metrics, tech: pd.DataFrame, ma_key: str = "MA20", days: int = 2) -> str:
+    """
+    檢查是否『站穩』MA20 / MA60
+    條件：
+      1. 最近收盤價連續 days 天都 >= 該均線
+      2. 成交量 >= MV20
+      3. 該均線斜率 >= 0 （均線翻揚或走平）
+    """
+    if tech is None or tech.empty:
+        return "❓ 無法判斷"
+
+    if getattr(m, ma_key) is None or m.close is None:
+        return "❓ 無法判斷"
+
+    # 最近 N 天收盤 >= 均線
+    cond_close = (tech["Close"].tail(days) >= tech[ma_key].tail(days)).all()
+
+    # 量能條件
+    cond_vol = (m.volume is not None and m.MV20 is not None and m.volume >= m.MV20)
+
+    # 均線斜率：最近 3 天
+    ma_series = tech[ma_key].dropna().tail(3)
+    cond_slope = False
+    if len(ma_series) >= 2:
+        cond_slope = (ma_series.iloc[-1] - ma_series.iloc[0]) >= 0
+
+    # 判斷
+    if cond_close and cond_vol and cond_slope:
+        return f"✅ 已站穩 {ma_key}（連續 {days} 日收盤在上方，放量，均線翻揚）"
+    elif cond_close and (cond_vol or cond_slope):
+        return f"⚠️ 剛突破 {ma_key}，需觀察量能與均線是否翻揚"
+    else:
+        return f"❌ 尚未站穩 {ma_key}（假突破風險高）"
+
+
+
 
 # =============================
 # 🎯 目標價模組
@@ -1500,6 +1539,9 @@ def practical_advice(m: Metrics, result: dict, lv: dict) -> str:
 advice_text = practical_advice(m, result, lv)
 st.info(advice_text)
 
+# 額外顯示 MA20 / MA60 是否站穩
+st.caption(check_stand_ma(m, tech, "MA20"))
+st.caption(check_stand_ma(m, tech, "MA60"))
 
 
 # ======================================================================
