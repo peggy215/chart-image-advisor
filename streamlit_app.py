@@ -1922,15 +1922,15 @@ if pa:
         result["short"]["score"], result["swing"]["score"],
         m, pa, atr_pct,
         targets,
-        weekly_targets=wk  # 👈 把週線中長目標一起納入建議判斷
+        weekly_targets=wk  
     )
     st.success(suggestion)
     advice_txt, advice_facts = ma_defense_advice_enhanced(m, tech, lots, patt if 'patt' in locals() else None)
-st.info(advice_txt)
-with st.expander("判斷依據（價/MA/量能/形態/收復）"):
-    nice = {k: (None if v is None else (f"{v:.2f}" if isinstance(v,(int,float)) else v))
+    st.info(advice_txt)
+    with st.expander("判斷依據（價/MA/量能/形態/收復）"):
+      nice = {k: (None if v is None else (f"{v:.2f}" if isinstance(v,(int,float)) else v))
             for k, v in advice_facts.items()}
-    st.json(nice)
+      st.json(nice)
 
 else:
     st.write("（如要得到個人化建議，請於右側輸入平均成本與庫存張數）")
