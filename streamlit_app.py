@@ -1776,6 +1776,21 @@ with st.expander("支撐/壓力計算說明"):
 - 旁註 **（當日POC）** 或 **（60日POC）** 代表該價位與 POC 重疊，成交密集、有效性更高。
 """)
 
+# === 畫面顯示（放在『🧭 支撐 / 壓力』之後、『👤 個人持倉評估』之前） ===
+# 只呼叫一次的當沖建議（合併順勢/區間邏輯）
+try:
+    vp_full = volume_profile(tech, lookback=60, bins=24) or {}
+except Exception:
+    vp_full = {}
+
+# 讓當沖卡片每次按「產生建議」都能重新渲染
+st.session_state.pop("_intraday_rendered", None)
+
+# 正確的參數順序： (m, tech, poc_today, vp_full, symbol)
+render_intraday_advice_once(m, tech, poc_today, vp_full, code_display)
+
+
+
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 插入結束：支撐 / 壓力 <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 # ===== 趨勢燈號（狀態 + 行動） ==============================================
