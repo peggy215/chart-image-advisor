@@ -989,45 +989,6 @@ def adjust_scores_with_candles_filtered(
     res["notes"].append(note_text.splitlines()[0])
     return res, note_text
 
-
-
-
-
-
-# =============================
-# 風控 / 個人化動作（已接上目標價）
-# =============================
-def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
-    if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
-        return {}
-    diff = m.close - avg_cost
-    ret_pct = diff / avg_cost * 100
-    shares = lots * 1000.0
-    unrealized = diff * shares
-    return {"ret_pct": ret_pct, "unrealized": unrealized, "shares": shares, "lots": lots}
-
-def risk_budget_hint(atr_pct: Optional[float]) -> str:
-    if atr_pct is None or np.isnan(atr_pct):
-        return "風控：建議單筆風險 1%–2%（波動度無法取得）"
-    if atr_pct >= 5:
-        return "風控：波動大（ATR≈{:.1f}%），建議單筆風險 **0.5%–0.8%**".format(atr_pct)
-    if atr_pct >= 3:
-        return "風控：波動偏大（ATR≈{:.1f}%），建議單筆風險 **0.8%–1.2%**".format(atr_pct)
-    if atr_pct >= 1.5:
-        return "風控：波動中等（ATR≈{:.1f}%），建議單筆風險 **1.0%–1.5%**".format(atr_pct)
-    return "風控：波動低（ATR≈{:.1f}%），建議單筆風險 **1.5%–2.0%**".format(atr_pct)
-
-def pct_diff(a: float, b: float) -> float:
-    if a is None or b is None or b == 0: return np.inf
-    return (a / b - 1.0) * 100.0
-
-def personalized_action(symbol: str,
-                        short_score: int, swing_score: int,
-                        m: Metrics, pa: Dict[str, float],
-                        atr_hint_pct: Optional[float],       # 👈 參數名改掉，避免衝突
-                        targets: Dict,
-                        weekly_targets: Optional[Dict] = None) -> str:
-   
  def ma_defense_advice_enhanced(
     m: Metrics, tech: pd.DataFrame,
     lots: float | None = None, patt: dict | None = None
@@ -1198,6 +1159,45 @@ def personalized_action(symbol: str,
         "action": action,
     }
     return text, facts
+
+
+
+
+# =============================
+# 風控 / 個人化動作（已接上目標價）
+# =============================
+def position_analysis(m: Metrics, avg_cost: Optional[float], lots: Optional[float]) -> Dict[str, float]:
+    if avg_cost is None or avg_cost <= 0 or lots is None or lots <= 0:
+        return {}
+    diff = m.close - avg_cost
+    ret_pct = diff / avg_cost * 100
+    shares = lots * 1000.0
+    unrealized = diff * shares
+    return {"ret_pct": ret_pct, "unrealized": unrealized, "shares": shares, "lots": lots}
+
+def risk_budget_hint(atr_pct: Optional[float]) -> str:
+    if atr_pct is None or np.isnan(atr_pct):
+        return "風控：建議單筆風險 1%–2%（波動度無法取得）"
+    if atr_pct >= 5:
+        return "風控：波動大（ATR≈{:.1f}%），建議單筆風險 **0.5%–0.8%**".format(atr_pct)
+    if atr_pct >= 3:
+        return "風控：波動偏大（ATR≈{:.1f}%），建議單筆風險 **0.8%–1.2%**".format(atr_pct)
+    if atr_pct >= 1.5:
+        return "風控：波動中等（ATR≈{:.1f}%），建議單筆風險 **1.0%–1.5%**".format(atr_pct)
+    return "風控：波動低（ATR≈{:.1f}%），建議單筆風險 **1.5%–2.0%**".format(atr_pct)
+
+def pct_diff(a: float, b: float) -> float:
+    if a is None or b is None or b == 0: return np.inf
+    return (a / b - 1.0) * 100.0
+
+def personalized_action(symbol: str,
+                        short_score: int, swing_score: int,
+                        m: Metrics, pa: Dict[str, float],
+                        atr_hint_pct: Optional[float],       # 👈 參數名改掉，避免衝突
+                        targets: Dict,
+                        weekly_targets: Optional[Dict] = None) -> str:
+   
+
                            
                             
                             
@@ -2012,7 +2012,7 @@ except Exception:
     vp_full = {}
 
 
-render_intraday_advice_once(tech, m, poc_today, vp_full, code_display)
+render_intraday_plan_once(m, tech, poc_today, vp_full, code_display)
 
 
 
