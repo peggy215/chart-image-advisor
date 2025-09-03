@@ -372,6 +372,77 @@ def interpret_gap(gap_pct: Optional[float], vol_r5: Optional[float]) -> str:
 
     return f"{s}：{gap_pct:.2f}%（{strength}）{extra}"
 
+def render_intraday_advice_once(tech: pd.DataFrame,
+                                m: Metrics,
+                                poc_today: Optional[float],
+                                vp_full: Optional[Dict[str, float]],
+                                symbol: str) -> None:
+    """
+    顯示精簡版當沖提示（僅一行）。
+    進場：VWAP 或 POC（兩者皆有則取均值）
+    停損：進場價 -1%
+    出場：進場價 +1%（或前高；此簡版用 +1%）
+    若現價已遠離進場價（±0.8%以上），提示「等回測/不追」。
+    """
+    # 取 VWAP 近似（HLC/3）
+    vwap = None
+    try:
+        if m.vwap_approx is not None:
+            vwap = float(m.vwap_approx)
+        else:
+            last = tech.iloc[-1]
+            vwap = float((last["High"] + last["Low"] + last["Close"]) / 3.0)
+    except Exception:
+        vwap = None
+
+    # 取 POC（優先當日，其次 60 日量價分布）
+    poc = None
+    if poc_today is not None:
+        poc = float(poc_today)
+    elif isinstance(vp_full, dict):
+        poc = vp_full.get("POC", None)
+
+    # 選進場基準
+    entry = None
+    basis = ""
+    if vwap is not None and poc is not None:
+        entry = (vwap + poc) / 2.0
+        basis = "VWAP/POC 均值"
+    elif vwap is not None:
+        entry = vwap
+        basis = "VWAP"
+    elif poc is not None:
+        entry = poc
+        basis = "POC"
+
+    if entry is None:
+        st.caption("💡 當沖：資料不足（缺 VWAP/POC），略。")
+        return
+
+    stop = round(entry * 0.99, 2)   # -1%
+    take = round(entry * 1.01, 2)   # +1%
+    entry = round(entry, 2)
+
+    # 偏離檢查
+    hint = ""
+    try:
+        cp = float(m.close) if m.close is not None else None
+        if cp is not None and entry:
+            bias = (cp / entry - 1.0) * 100.0
+            if bias >= 0.8:
+                hint = f"（現價 +{bias:.1f}% 高於進場：等回測，不追高）"
+            elif bias <= -0.8:
+                hint = f"（現價 {bias:.1f}% 低於進場：僅逆勢短打，嚴設停損）"
+    except Exception:
+        pass
+
+    st.caption(
+        f"💡 當沖提示：以 **{basis}≈{entry:.2f}** 為軸，"
+        f"**進 {entry:.2f} / 停 {stop:.2f} / 出 {take:.2f}**。"
+        f"守停損，達前高或 +1% 獲利出場。{hint}"
+    )
+
+
 # =============================
 # 均線站穩檢查
 # =============================
@@ -1935,7 +2006,11 @@ def daytrade_suggestion_auto(symbol: str) -> tuple[str, dict]:
 
 # === 畫面顯示（放在『🧭 支撐 / 壓力』之後、『👤 個人持倉評估』之前） ===
 # 只呼叫一次的當沖建議（合併順勢/區間邏輯）
-vp_full = volume_profile(tech, lookback=60, bins=24) or {}
+try:
+    vp_full = volume_profile(tech, lookback=60, bins=24) or {}
+except Exception:
+    vp_full = {}
+
 
 render_intraday_advice_once(tech, m, poc_today, vp_full, code_display)
 
