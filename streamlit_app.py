@@ -989,176 +989,176 @@ def adjust_scores_with_candles_filtered(
     res["notes"].append(note_text.splitlines()[0])
     return res, note_text
 
- def ma_defense_advice_enhanced(
-    m: Metrics, tech: pd.DataFrame,
-    lots: float | None = None, patt: dict | None = None
+def ma_defense_advice_enhanced(
+m: Metrics, tech: pd.DataFrame,
+lots: float | None = None, patt: dict | None = None
 ) -> tuple[str, dict]:
-    """
-    🛡️ MA5 / MA10 防守建議（量能＋形態＋「收復是否放量」）
-    規則（做多視角）：
-      量能過濾：
-        - 放量（Vol/MV20 ≥1.2）或 短線放量（Vol/MV5 ≥1.3）
-        - 量縮（Vol/MV20 ≤0.8 且 Vol/MV5 ≤0.9）
-      K 線形態加權：
-        - 長紅（Bull_Marubozu）/多頭吞噬 → 偏寬鬆
-        - 長黑（Bear_Marubozu）/空頭吞噬 → 偏嚴格
-      收復判斷（新增）：
-        - 前一日 Close < 前一日 MA5，且今日 Close ≥ 今日 MA5 → 昨日跌破、今日「收復 MA5」
-        - 或 今日 Low < 今日 MA5 且 Close ≥ 今日 MA5 → 盤中跌破、收盤「收復 MA5」
-        - 收復若『放量』→ 支撐有效性更高；『量縮』→ 謹慎
-      價位規則：
-        1) Close ≥ MA5 → 續抱；防守 = max(MA5, 前一日低點)
-        2) MA10 ≤ Close < MA5 → 轉弱，依量能/形態/是否收復調整減碼幅度
-        3) Close < MA10 → 偏空，依量能/形態決定停損力度
-    """
-    if m is None or tech is None or tech.empty:
-        return "❓ 無法判斷（缺少技術資料）", {}
+"""
+🛡️ MA5 / MA10 防守建議（量能＋形態＋「收復是否放量」）
+規則（做多視角）：
+  量能過濾：
+    - 放量（Vol/MV20 ≥1.2）或 短線放量（Vol/MV5 ≥1.3）
+    - 量縮（Vol/MV20 ≤0.8 且 Vol/MV5 ≤0.9）
+  K 線形態加權：
+    - 長紅（Bull_Marubozu）/多頭吞噬 → 偏寬鬆
+    - 長黑（Bear_Marubozu）/空頭吞噬 → 偏嚴格
+  收復判斷（新增）：
+    - 前一日 Close < 前一日 MA5，且今日 Close ≥ 今日 MA5 → 昨日跌破、今日「收復 MA5」
+    - 或 今日 Low < 今日 MA5 且 Close ≥ 今日 MA5 → 盤中跌破、收盤「收復 MA5」
+    - 收復若『放量』→ 支撐有效性更高；『量縮』→ 謹慎
+  價位規則：
+    1) Close ≥ MA5 → 續抱；防守 = max(MA5, 前一日低點)
+    2) MA10 ≤ Close < MA5 → 轉弱，依量能/形態/是否收復調整減碼幅度
+    3) Close < MA10 → 偏空，依量能/形態決定停損力度
+"""
+if m is None or tech is None or tech.empty:
+    return "❓ 無法判斷（缺少技術資料）", {}
 
-    # 當日價、量、均線
-    close = float(m.close) if m.close is not None else None
-    low   = float(tech["Low"].iloc[-1])
-    vol   = float(tech["Volume"].iloc[-1]) if "Volume" in tech.columns else None
+# 當日價、量、均線
+close = float(m.close) if m.close is not None else None
+low   = float(tech["Low"].iloc[-1])
+vol   = float(tech["Volume"].iloc[-1]) if "Volume" in tech.columns else None
 
-    # MV5/MV20 優先取 tech（避免 m 裡舊值），再用 m 補
-    mv5  = (float(tech["MV5"].iloc[-1])
-            if "MV5" in tech.columns and pd.notna(tech["MV5"].iloc[-1])
-            else (float(m.MV5) if m.MV5 is not None else None))
-    mv20 = (float(tech["MV20"].iloc[-1])
-            if "MV20" in tech.columns and pd.notna(tech["MV20"].iloc[-1])
-            else (float(m.MV20) if m.MV20 is not None else None))
-    ma5  = float(m.MA5)  if m.MA5  is not None else None
-    ma10 = float(m.MA10) if m.MA10 is not None else None
+# MV5/MV20 優先取 tech（避免 m 裡舊值），再用 m 補
+mv5  = (float(tech["MV5"].iloc[-1])
+        if "MV5" in tech.columns and pd.notna(tech["MV5"].iloc[-1])
+        else (float(m.MV5) if m.MV5 is not None else None))
+mv20 = (float(tech["MV20"].iloc[-1])
+        if "MV20" in tech.columns and pd.notna(tech["MV20"].iloc[-1])
+        else (float(m.MV20) if m.MV20 is not None else None))
+ma5  = float(m.MA5)  if m.MA5  is not None else None
+ma10 = float(m.MA10) if m.MA10 is not None else None
 
-    if close is None or ma5 is None or ma10 is None:
-        return "❓ 無法判斷（Close/MA 值不足）", {}
+if close is None or ma5 is None or ma10 is None:
+    return "❓ 無法判斷（Close/MA 值不足）", {}
 
-    # 形態（若未外部計算則內部偵測）
-    if patt is None:
-        try:
-            patt = detect_candles(tech)
-        except Exception:
-            patt = {}
-    is_bull_candle = any(x in (patt.get("last") or []) for x in ["Bull_Marubozu","Bull_Engulfing","MorningStar","Hammer/HS"])
-    is_bear_candle = any(x in (patt.get("last") or []) for x in ["Bear_Marubozu","Bear_Engulfing","EveningStar","ShootingStar"])
+# 形態（若未外部計算則內部偵測）
+if patt is None:
+    try:
+        patt = detect_candles(tech)
+    except Exception:
+        patt = {}
+is_bull_candle = any(x in (patt.get("last") or []) for x in ["Bull_Marubozu","Bull_Engulfing","MorningStar","Hammer/HS"])
+is_bear_candle = any(x in (patt.get("last") or []) for x in ["Bear_Marubozu","Bear_Engulfing","EveningStar","ShootingStar"])
 
-    # 量能比
-    vol_r20 = (vol / mv20) if (vol is not None and mv20 not in (None, 0)) else None
-    vol_r5  = (vol / mv5)  if (vol is not None and mv5  not in (None, 0)) else None
-    vol_ok      = (vol_r20 is not None and vol_r20 >= 1.2) or (vol_r5 is not None and vol_r5 >= 1.3)
-    vol_weakish = (vol_r20 is not None and vol_r20 <= 0.8) and (vol_r5 is not None and vol_r5 <= 0.9)
+# 量能比
+vol_r20 = (vol / mv20) if (vol is not None and mv20 not in (None, 0)) else None
+vol_r5  = (vol / mv5)  if (vol is not None and mv5  not in (None, 0)) else None
+vol_ok      = (vol_r20 is not None and vol_r20 >= 1.2) or (vol_r5 is not None and vol_r5 >= 1.3)
+vol_weakish = (vol_r20 is not None and vol_r20 <= 0.8) and (vol_r5 is not None and vol_r5 <= 0.9)
 
-    def vol_tag(vr5, vr20) -> str:
-        parts = []
-        if vr20 is not None:
-            if vr20 >= 1.2: parts.append(f"放量(Vol/MV20≈{vr20:.2f})")
-            elif vr20 <= 0.8: parts.append(f"量縮(Vol/MV20≈{vr20:.2f})")
-            else: parts.append(f"中性量(Vol/MV20≈{vr20:.2f})")
-        if vr5 is not None:
-            if vr5 >= 1.3: parts.append(f"短線放量(Vol/MV5≈{vr5:.2f})")
-            elif vr5 <= 0.9: parts.append(f"短線量縮(Vol/MV5≈{vr5:.2f})")
-            else: parts.append(f"短線中性(Vol/MV5≈{vr5:.2f})")
-        return "、".join(parts) if parts else "—"
+def vol_tag(vr5, vr20) -> str:
+    parts = []
+    if vr20 is not None:
+        if vr20 >= 1.2: parts.append(f"放量(Vol/MV20≈{vr20:.2f})")
+        elif vr20 <= 0.8: parts.append(f"量縮(Vol/MV20≈{vr20:.2f})")
+        else: parts.append(f"中性量(Vol/MV20≈{vr20:.2f})")
+    if vr5 is not None:
+        if vr5 >= 1.3: parts.append(f"短線放量(Vol/MV5≈{vr5:.2f})")
+        elif vr5 <= 0.9: parts.append(f"短線量縮(Vol/MV5≈{vr5:.2f})")
+        else: parts.append(f"短線中性(Vol/MV5≈{vr5:.2f})")
+    return "、".join(parts) if parts else "—"
 
-    vtag = vol_tag(vol_r5, vol_r20)
+vtag = vol_tag(vol_r5, vol_r20)
 
-    # 「曾破線 → 收復」偵測（以 MA5 為主）
-    prev_close = float(tech["Close"].iloc[-2]) if len(tech) >= 2 else None
-    prev_ma5   = float(tech["MA5"].iloc[-2])  if ("MA5" in tech.columns and len(tech) >= 2 and pd.notna(tech["MA5"].iloc[-2])) else None
+# 「曾破線 → 收復」偵測（以 MA5 為主）
+prev_close = float(tech["Close"].iloc[-2]) if len(tech) >= 2 else None
+prev_ma5   = float(tech["MA5"].iloc[-2])  if ("MA5" in tech.columns and len(tech) >= 2 and pd.notna(tech["MA5"].iloc[-2])) else None
 
-    # 昨日跌破、今日收復
-    reclaimed_ma5_yesterday = (prev_close is not None and prev_ma5 is not None and prev_close < prev_ma5 and close >= ma5)
-    # 今日盤中跌破、收盤收復
-    reclaimed_ma5_intraday  = (low < ma5 and close >= ma5)
-    reclaimed_ma5 = reclaimed_ma5_yesterday or reclaimed_ma5_intraday
+# 昨日跌破、今日收復
+reclaimed_ma5_yesterday = (prev_close is not None and prev_ma5 is not None and prev_close < prev_ma5 and close >= ma5)
+# 今日盤中跌破、收盤收復
+reclaimed_ma5_intraday  = (low < ma5 and close >= ma5)
+reclaimed_ma5 = reclaimed_ma5_yesterday or reclaimed_ma5_intraday
 
-    # 張數語句
-    def reduce_phrase(light=False, heavy=False):
-        if not lots or lots <= 1:
-            return "小量減碼" if (light or heavy) else "可續抱觀察"
-        if lots < 3:
-            return "先賣 1 張" if (light or heavy) else "小量減碼"
-        return "分批減碼 10%–20%" if light else ("分批減碼 30%–50%" if heavy else "分批減碼 10%")
+# 張數語句
+def reduce_phrase(light=False, heavy=False):
+    if not lots or lots <= 1:
+        return "小量減碼" if (light or heavy) else "可續抱觀察"
+    if lots < 3:
+        return "先賣 1 張" if (light or heavy) else "小量減碼"
+    return "分批減碼 10%–20%" if light else ("分批減碼 30%–50%" if heavy else "分批減碼 10%")
 
-    # 曾跌破提示
-    warn = []
-    if low < ma5 <= close:  warn.append("曾跌破 MA5 但收回")
-    if low < ma10 <= close: warn.append("曾跌破 MA10 但收回")
+# 曾跌破提示
+warn = []
+if low < ma5 <= close:  warn.append("曾跌破 MA5 但收回")
+if low < ma10 <= close: warn.append("曾跌破 MA10 但收回")
 
-    # === 決策邏輯（含量能/形態/收復放量） ===
-    if close >= ma5:
-        prev_low = float(tech["Low"].iloc[-2]) if len(tech) >= 2 else None
-        defend = max([x for x in [ma5, prev_low] if x is not None], default=ma5)
-        text = f"✅ 續抱：收盤在 **MA5** 之上。防守線設 **{defend:.2f}**（MA5/前一日低點取較高）。"
+# === 決策邏輯（含量能/形態/收復放量） ===
+if close >= ma5:
+    prev_low = float(tech["Low"].iloc[-2]) if len(tech) >= 2 else None
+    defend = max([x for x in [ma5, prev_low] if x is not None], default=ma5)
+    text = f"✅ 續抱：收盤在 **MA5** 之上。防守線設 **{defend:.2f}**（MA5/前一日低點取較高）。"
 
-        # 收復 MA5 的語意差異（放量 vs 量縮）
-        if reclaimed_ma5:
-            if vol_ok:
-                text += " 出現**放量收復 MA5**，支撐有效性提升，續抱可偏積極（必要時小量加碼，不追高）。"
-            elif vol_weakish:
-                text += " **量縮收復 MA5**，先續抱但不急著加碼，觀察量能是否跟上。"
-            else:
-                text += " 收復 MA5，但量能中性，續抱觀察後續量價。"
-
-        # 當日形態加味
-        if is_bull_candle and vol_ok:
-            text += " 形態：長紅/多方訊號且放量，續抱偏積極。"
-        elif is_bear_candle:
-            text += " 形態：出現偏空形態，續抱但提高警戒。"
-
-        if vtag != "—": text += f" 量能：{vtag}。"
-        if warn:        text += "（" + "、".join(warn) + "）"
-        action = "續抱"
-
-    elif close < ma5 and close >= ma10:
-        # 轉弱區：依量能/形態/（是否收復失敗）調整力度
-        heavy = (vol_ok or is_bear_candle)
-        light = (vol_weakish and not is_bear_candle)
-
-        if is_bear_candle and vol_ok:
-            text = f"⚠️ 轉弱：收盤跌破 **MA5**（長黑/吞噬且放量）。建議 **{reduce_phrase(heavy=True)}**；明日若無法站回 MA5，續降風險。"
-        elif heavy:
-            text = f"⚠️ 轉弱：收盤跌破 **MA5**（放量或形態偏空）。建議 **{reduce_phrase(heavy=True)}**；若明日無法站回 MA5，續降風險。"
-        elif light:
-            text = f"⚠️ 轉弱：收盤跌破 **MA5**（量縮）。建議 **{reduce_phrase(light=True)}** 或觀察一天；再弱則依計畫減碼。"
+    # 收復 MA5 的語意差異（放量 vs 量縮）
+    if reclaimed_ma5:
+        if vol_ok:
+            text += " 出現**放量收復 MA5**，支撐有效性提升，續抱可偏積極（必要時小量加碼，不追高）。"
+        elif vol_weakish:
+            text += " **量縮收復 MA5**，先續抱但不急著加碼，觀察量能是否跟上。"
         else:
-            text = f"⚠️ 轉弱：收盤跌破 **MA5**。建議 **{reduce_phrase(light=True)}**；若明日無法站回 MA5，續降風險。"
+            text += " 收復 MA5，但量能中性，續抱觀察後續量價。"
 
-        if vtag != "—": text += f" 量能：{vtag}。"
-        action = "減碼"
+    # 當日形態加味
+    if is_bull_candle and vol_ok:
+        text += " 形態：長紅/多方訊號且放量，續抱偏積極。"
+    elif is_bear_candle:
+        text += " 形態：出現偏空形態，續抱但提高警戒。"
 
-    else:  # close < ma10
-        # 偏空區：依量能/形態調整力度
-        heavy = (vol_ok or is_bear_candle)
-        light = (vol_weakish and not is_bear_candle)
+    if vtag != "—": text += f" 量能：{vtag}。"
+    if warn:        text += "（" + "、".join(warn) + "）"
+    action = "續抱"
 
-        if is_bear_candle and vol_ok:
-            text = f"❌ 偏空：收盤跌破 **MA10**（長黑/吞噬且放量）。建議 **優先出清或{reduce_phrase(heavy=True)}**。"
-        elif heavy:
-            text = f"❌ 偏空：收盤跌破 **MA10**（放量或形態偏空）。建議 **{reduce_phrase(heavy=True)}** 或出清，嚴控風險。"
-        elif light:
-            text = f"❌ 偏空：收盤跌破 **MA10**（量縮）。建議 **{reduce_phrase(light=True)}**，逢反彈再調節；續弱仍需嚴設停損。"
-        else:
-            text = f"❌ 偏空：收盤跌破 **MA10**。建議 **{reduce_phrase(heavy=True)}** 或出清。"
+elif close < ma5 and close >= ma10:
+    # 轉弱區：依量能/形態/（是否收復失敗）調整力度
+    heavy = (vol_ok or is_bear_candle)
+    light = (vol_weakish and not is_bear_candle)
 
-        if vtag != "—": text += f" 量能：{vtag}。"
-        action = "停損/出清"
+    if is_bear_candle and vol_ok:
+        text = f"⚠️ 轉弱：收盤跌破 **MA5**（長黑/吞噬且放量）。建議 **{reduce_phrase(heavy=True)}**；明日若無法站回 MA5，續降風險。"
+    elif heavy:
+        text = f"⚠️ 轉弱：收盤跌破 **MA5**（放量或形態偏空）。建議 **{reduce_phrase(heavy=True)}**；若明日無法站回 MA5，續降風險。"
+    elif light:
+        text = f"⚠️ 轉弱：收盤跌破 **MA5**（量縮）。建議 **{reduce_phrase(light=True)}** 或觀察一天；再弱則依計畫減碼。"
+    else:
+        text = f"⚠️ 轉弱：收盤跌破 **MA5**。建議 **{reduce_phrase(light=True)}**；若明日無法站回 MA5，續降風險。"
 
-    facts = {
-        "Close": close, "Low": low,
-        "MA5": ma5, "MA10": ma10,
-        "MV5": mv5, "MV20": mv20, "Volume": vol,
-        "Vol/MV5": (None if vol_r5  is None else round(vol_r5, 2)),
-        "Vol/MV20":(None if vol_r20 is None else round(vol_r20,2)),
-        "bull_candle": is_bull_candle, "bear_candle": is_bear_candle,
-        "reclaimed_ma5_yesterday": reclaimed_ma5_yesterday,
-        "reclaimed_ma5_intraday": reclaimed_ma5_intraday,
-        "reclaimed_ma5": reclaimed_ma5,
-        "vol_ok_for_reclaim": vol_ok,
-        "vol_weakish_for_reclaim": vol_weakish,
-        "warn": "、".join(warn) if warn else "",
-        "action": action,
-    }
-    return text, facts
+    if vtag != "—": text += f" 量能：{vtag}。"
+    action = "減碼"
+
+else:  # close < ma10
+    # 偏空區：依量能/形態調整力度
+    heavy = (vol_ok or is_bear_candle)
+    light = (vol_weakish and not is_bear_candle)
+
+    if is_bear_candle and vol_ok:
+        text = f"❌ 偏空：收盤跌破 **MA10**（長黑/吞噬且放量）。建議 **優先出清或{reduce_phrase(heavy=True)}**。"
+    elif heavy:
+        text = f"❌ 偏空：收盤跌破 **MA10**（放量或形態偏空）。建議 **{reduce_phrase(heavy=True)}** 或出清，嚴控風險。"
+    elif light:
+        text = f"❌ 偏空：收盤跌破 **MA10**（量縮）。建議 **{reduce_phrase(light=True)}**，逢反彈再調節；續弱仍需嚴設停損。"
+    else:
+        text = f"❌ 偏空：收盤跌破 **MA10**。建議 **{reduce_phrase(heavy=True)}** 或出清。"
+
+    if vtag != "—": text += f" 量能：{vtag}。"
+    action = "停損/出清"
+
+facts = {
+    "Close": close, "Low": low,
+    "MA5": ma5, "MA10": ma10,
+    "MV5": mv5, "MV20": mv20, "Volume": vol,
+    "Vol/MV5": (None if vol_r5  is None else round(vol_r5, 2)),
+    "Vol/MV20":(None if vol_r20 is None else round(vol_r20,2)),
+    "bull_candle": is_bull_candle, "bear_candle": is_bear_candle,
+    "reclaimed_ma5_yesterday": reclaimed_ma5_yesterday,
+    "reclaimed_ma5_intraday": reclaimed_ma5_intraday,
+    "reclaimed_ma5": reclaimed_ma5,
+    "vol_ok_for_reclaim": vol_ok,
+    "vol_weakish_for_reclaim": vol_weakish,
+    "warn": "、".join(warn) if warn else "",
+    "action": action,
+}
+return text, facts
 
 
 
