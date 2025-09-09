@@ -281,7 +281,7 @@ def analyze(m: Metrics,
         elif m.close is not None and m.close < poc_today:
             short_score -= 6; notes.append("收盤<當日POC (-6)")
 
-    # 波段
+    # 
     if gt(m.close, m.MA20): swing_score += 10; notes.append("收盤>MA20 (+10)")
     if gt(m.close, m.MA60): swing_score += 10; notes.append("收盤>MA60 (+10)")
     if gt(m.MA20, m.MA60): swing_score += 10; notes.append("MA20>MA60 (+10)")
@@ -555,7 +555,7 @@ def build_targets(m: Metrics,
     """
     回傳三層目標：
       - short_targets：近距離（短線）目標
-      - swing_targets：中距離（波段）目標
+      - swing_targets：中距離（）目標
       - mid_targets  ：較長距離（中長）目標，擴大時間窗（含 52週/2年高點、120/250日價值區、整數關卡、可選強制價位）
     """
     def dedup(xs, tol):
@@ -609,7 +609,7 @@ def build_targets(m: Metrics,
             short_candidates.append(float(v))
     short_targets = dedup(short_candidates, tol=0.3)[:2]
 
-    # ---- 波段目標（中）
+    # ---- 目標（中）
     swing_candidates = []
     for v in [box.get("t2_box"),
               fib.get("t1_fib"), fib.get("t2_fib"),
@@ -884,8 +884,8 @@ def adjust_scores_with_candles_filtered(
       - 量能過濾：Vol / MV20 >= vol_ratio_need 才具備參考價值
       - 位置過濾：距最近支撐/壓力 <= near_pct% 才具備參考價值
       - 加分幅度：
-          * 量能 + 位置皆符合：短線 ±4、波段 ±3
-          * 只符合其中一項：短線 ±2、波段 ±1
+          * 量能 + 位置皆符合：短線 ±4、 ±3
+          * 只符合其中一項：短線 ±2、 ±1
           * 都不符合：不加分（只顯示中性訊息）
     輸出會回傳（更新後的 result, 使用者可讀的說明文字）
     """
@@ -1516,6 +1516,14 @@ st.markdown("**短線目標**：{}".format(
 st.markdown("**波段目標**：{}".format(
     "-" if not targets.get("swing_targets") else ", ".join([f"{x:.2f}" for x in targets["swing_targets"]])
 ))
+# 👉 在這裡加判斷
+if targets.get("short_targets") and targets.get("swing_targets"):
+    short_max = max(targets["short_targets"])
+    swing_max = max(targets["swing_targets"])
+    if short_max > swing_max:
+        st.info("⚠️ 短線目標高於波段目標，代表近期走勢偏強，但仍需留意長期壓力。")
+
+
 st.markdown("**中長距離（日線延伸）**：{}".format(
     "-" if not targets.get("mid_targets") else ", ".join([f"{x:.2f}" for x in targets["mid_targets"]])
 ))
